@@ -1,0 +1,7 @@
+pandas>=2.0.0
+pandas-ta>=0.3.14b
+requests>=2.31.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+tenacity>=8.0.0
+FinMind>=1.6.0

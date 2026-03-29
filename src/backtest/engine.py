@@ -1,0 +1,486 @@
+"""Backtest replay engine — point-in-time monthly rebalance with daily return series."""
+
+from __future__ import annotations
+
+import logging
+import math
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+from ..portfolio.tw_stock import (
+    _analyze_symbol,
+    _rank_analyses,
+    _select_positions,
+    _analyze_market_proxy,
+    get_portfolio_config,
+)
+from ..storage.database import compute_config_hash
+from .metrics import compute_metrics, format_report
+from .universe import HistoricalUniverse
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_SLIPPAGE_BPS = 5
+DEFAULT_ROUND_TRIP_COST = 0.0047
+
+
+class _DataSlicer:
+    """包裝 source，將所有資料截斷到 as_of 日期以避免 look-ahead bias。
+
+    回測啟動時預載入資料，之後每次 fetch 時只回傳截至 as_of 的切片。
+    涵蓋：OHLCV、法人買賣超、月營收、市值。
+    """
+
+    def __init__(
+        self,
+        source,
+        as_of: datetime | None = None,
+        backtest_start: datetime | None = None,
+        reference_now: datetime | None = None,
+    ):
+        self._source = source
+        self._as_of: pd.Timestamp | None = None
+        self._backtest_start: datetime | None = backtest_start
+        # 固定「現在」時間點，避免同一回測內多次呼叫 datetime.now() 造成跨日漂移
+        self._reference_now: datetime = reference_now if reference_now is not None else datetime.now()
+        self._ohlcv_cache: dict[str, pd.DataFrame] = {}
+        self._df_cache: dict[str, pd.DataFrame] = {}
+        self._inst_coverage_warned: bool = False  # 只對同一 slicer 警告一次
+        if as_of is not None:
+            self.set_as_of(as_of)
+
+    def set_as_of(self, as_of: datetime) -> None:
+        self._as_of = pd.Timestamp(as_of, tz="UTC")
+
+    @property
+    def _as_of_naive(self) -> pd.Timestamp | None:
+        """回傳 timezone-naive 版本的 as_of（用於比較 naive date 欄位）。"""
+        if self._as_of is None:
+            return None
+        return self._as_of.tz_localize(None) if self._as_of.tzinfo else self._as_of
+
+    def _truncate_by_date_col(self, df: pd.DataFrame, tail: int | None = None) -> pd.DataFrame | None:
+        """依 'date' 欄位截斷 DataFrame 到 as_of，可選取最後 tail 筆。"""
+        if df is None or df.empty:
+            return None
+        if self._as_of_naive is not None and "date" in df.columns:
+            df = df[pd.to_datetime(df["date"]) <= self._as_of_naive]
+        if df.empty:
+            return None
+        if not tail:
+            return df
+
+        if "date" not in df.columns:
+            return df.tail(tail)
+
+        date_values = pd.to_datetime(df["date"], errors="coerce")
+        if date_values.isna().all():
+            return df.tail(tail)
+
+        unique_dates = pd.Index(date_values.dropna().unique()).sort_values()
+        if len(unique_dates) <= tail:
+            return df
+
+        cutoff = unique_dates[-tail]
+        return df[date_values >= cutoff]
+
+    def preload(self, symbols: list[str], days: int = 3000) -> None:
+        """預載入所有標的的歷史資料。"""
+        for symbol in symbols:
+            if symbol in self._ohlcv_cache:
+                continue
+            df = self._source.fetch_ohlcv(symbol, "D", days)
+            if df is not None and not df.empty:
+                self._ohlcv_cache[symbol] = df
+
+    def preload_reference_data(self, backtest_days: int = 2500) -> None:
+        """預載入市值等參考資料（回測全期間）。"""
+        if "market_value" not in self._df_cache:
+            mv = self._source.fetch_market_value(days=backtest_days)
+            # 即使回傳 None 也要 cache（以空 DataFrame 作為哨兵值），
+            # 避免後續 fetch_market_value() 重複發出相同的 API 請求。
+            self._df_cache["market_value"] = (
+                mv if (mv is not None and not mv.empty) else pd.DataFrame()
+            )
+
+    # --- OHLCV（index 為 UTC timestamp）---
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame | None:
+        """回傳截至 as_of 的 OHLCV 切片。"""
+        if symbol not in self._ohlcv_cache:
+            df = self._source.fetch_ohlcv(symbol, "D", max(limit, 2000))
+            # 無論成功或失敗都 cache（失敗以空 DataFrame 作為哨兵值），
+            # 避免下一個再平衡週期對同一標的重複發出 API 請求。
+            self._ohlcv_cache[symbol] = df if (df is not None and not df.empty) else pd.DataFrame()
+
+        df = self._ohlcv_cache[symbol]
+        if df.empty:
+            return None
+        if self._as_of is not None:
+            df = df[df.index <= self._as_of]
+        return df.tail(limit) if not df.empty else None
+
+    # --- 法人買賣超（date 欄位，naive datetime）---
+
+    def fetch_institutional(self, symbol: str, days: int = 30) -> pd.DataFrame | None:
+        cache_key = f"inst:{symbol}"
+        if cache_key not in self._df_cache:
+            # 若知道回測起始日，依此計算需覆蓋的天數；否則退回固定 500 天
+            if self._backtest_start is not None:
+                # FinMindSource 內部以 trading_days * 1.5 換算為 calendar days 窗口。
+                # 反向計算：ceil(calendar_days / 1.5) 取保守上界，確保起點早於 backtest_start。
+                # 使用固定 reference_now 避免同一回測跨日時漂移。
+                calendar_days_needed = (self._reference_now - self._backtest_start).days + 60
+                fetch_days = math.ceil(calendar_days_needed / 1.5)
+            else:
+                fetch_days = max(days, 500)
+            df = self._source.fetch_institutional(symbol, fetch_days)
+            if df is not None and not df.empty:
+                # Coverage guard：確認抓到的資料起點早於 backtest_start
+                if self._backtest_start is not None and not self._inst_coverage_warned:
+                    if "date" in df.columns:
+                        earliest = pd.to_datetime(df["date"]).min()
+                        if earliest > pd.Timestamp(self._backtest_start):
+                            logger.warning(
+                                "Institutional data coverage insufficient: earliest record %s "
+                                "is after backtest_start %s (first seen on symbol %s). "
+                                "Factor scores for early rebalance periods will be zero.",
+                                earliest.date(), self._backtest_start.date(), symbol,
+                            )
+                            self._inst_coverage_warned = True
+            # 無論成功或失敗都 cache（失敗以空 DataFrame 作為哨兵值），
+            # 避免下一個再平衡週期對同一標的重複發出 API 請求。
+            self._df_cache[cache_key] = df if (df is not None and not df.empty) else pd.DataFrame()
+        df = self._df_cache.get(cache_key)
+        if df is None or df.empty:
+            return None
+        return self._truncate_by_date_col(df.copy(), tail=days)
+
+    # --- 月營收（date 欄位，naive datetime）---
+
+    def fetch_month_revenue(self, symbol: str, months: int = 15) -> pd.DataFrame | None:
+        cache_key = f"rev:{symbol}"
+        if cache_key not in self._df_cache:
+            df = self._source.fetch_month_revenue(symbol, max(months, 60))
+            # 無論成功或失敗都 cache（失敗以空 DataFrame 作為哨兵值），
+            # 避免下一個再平衡週期對同一標的重複發出 API 請求。
+            self._df_cache[cache_key] = df if (df is not None and not df.empty) else pd.DataFrame()
+        df = self._df_cache.get(cache_key)
+        if df is None or df.empty:
+            return None
+        return self._truncate_by_date_col(df.copy(), tail=months)
+
+    # --- 市值資料（全市場，date 欄位）---
+
+    def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
+        if "market_value" not in self._df_cache:
+            mv = self._source.fetch_market_value(days=max(days, 2500))
+            self._df_cache["market_value"] = (
+                mv if (mv is not None and not mv.empty) else pd.DataFrame()
+            )
+        df = self._df_cache.get("market_value")
+        # 空 DataFrame 為「已查詢但無資料」的哨兵值，與 None 同等回傳 None
+        if df is None or df.empty:
+            return None
+        return self._truncate_by_date_col(df.copy())
+
+    # --- 靜態參考資料（直接透傳）---
+
+    def fetch_stock_info(self) -> pd.DataFrame | None:
+        return self._source.fetch_stock_info()
+
+    def fetch_delisting(self) -> pd.DataFrame | None:
+        if hasattr(self._source, "fetch_delisting"):
+            return self._source.fetch_delisting()
+        return None
+
+    # 透傳其他未覆寫的方法
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+
+class BacktestEngine:
+    """逐月 replay 引擎，產出日頻報酬序列。
+
+    核心修正：
+    - 使用 _DataSlicer 截斷資料到 as_of，避免 look-ahead bias
+    - 產出日頻（非月頻）投組報酬序列
+    - 每次再平衡時正確扣除 round-trip cost + 滑價
+    - Benchmark 與 portfolio 在日頻層級對齊
+    """
+
+    def __init__(
+        self,
+        source,
+        config: dict,
+        slippage_bps: int = DEFAULT_SLIPPAGE_BPS,
+    ):
+        self._source = source
+        self._config = config
+        self._portfolio_config = get_portfolio_config(config)
+        self._slippage_bps = slippage_bps
+        self._round_trip_cost = float(
+            self._portfolio_config.get("turnover_cost", DEFAULT_ROUND_TRIP_COST)
+        )
+
+    def run(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        benchmark_symbol: str = "0050",
+    ) -> dict:
+        """執行回測，回傳日頻報酬序列與完整 KPI。"""
+        logger.info("Backtest: %s to %s", start_date.date(), end_date.date())
+
+        rebalance_day = int(self._portfolio_config.get("rebalance_day", 12))
+        rebalance_dates = self._generate_rebalance_dates(start_date, end_date, rebalance_day)
+
+        if not rebalance_dates:
+            logger.error("No rebalance dates in range")
+            return {"metrics": {}, "report": "No rebalance dates", "monthly_snapshots": []}
+
+        # 固定「現在」時間點：整輪回測使用同一個 reference_now，
+        # 避免在跨午夜或長時間回測中 datetime.now() 的多次呼叫造成窗口不一致。
+        reference_now = datetime.now()
+
+        # 建立截斷資料代理；傳入 backtest_start 與 reference_now 讓各 fetch 方法
+        # 計算正確的覆蓋窗口，且整輪保持一致。
+        slicer = _DataSlicer(
+            self._source,
+            backtest_start=start_date,
+            reference_now=reference_now,
+        )
+
+        # 預載入市值等參考資料（覆蓋從回測起點到 reference_now 的完整期間）
+        backtest_days = (reference_now - start_date).days + 60
+        slicer.preload_reference_data(backtest_days)
+
+        # 建立 point-in-time universe（處理 IPO / 下市 / 市值排序）
+        hist_universe = HistoricalUniverse(slicer)
+        hist_universe.load()
+
+        # --- 取得 benchmark 日線報酬 ---
+        bench_df = self._source.fetch_ohlcv(benchmark_symbol, "D", 3000)
+        benchmark_daily: pd.Series | None = None
+        if bench_df is not None and not bench_df.empty:
+            benchmark_daily = bench_df["close"].pct_change().dropna()
+
+        # --- 逐月 replay ---
+        monthly_snapshots: list[dict] = []
+        current_holdings: dict[str, float] = {}  # symbol -> weight
+        all_daily_returns: list[tuple[pd.Timestamp, float]] = []
+        default_strategy = self._config.get("default_strategy", {})
+
+        for i, rebal_date in enumerate(rebalance_dates):
+            logger.info("Rebalance #%d: %s", i + 1, rebal_date.date())
+
+            # 截斷資料到再平衡日
+            slicer.set_as_of(rebal_date)
+
+            # --- Step A: 計算上一期的日頻報酬 ---
+            if i > 0 and current_holdings:
+                prev_rebal = rebalance_dates[i - 1]
+                daily_rets = self._compute_daily_returns(
+                    current_holdings, prev_rebal, rebal_date, slicer
+                )
+                all_daily_returns.extend(daily_rets)
+
+            # --- Step B: 決定新投組（point-in-time universe）---
+            universe = hist_universe.get_universe_at(
+                rebal_date, self._portfolio_config, source=slicer
+            )
+            if not universe:
+                logger.warning("Empty universe at %s; keeping positions", rebal_date.date())
+                continue
+
+            analyses = []
+            for sym_config in universe:
+                try:
+                    analyses.append(
+                        _analyze_symbol(sym_config, slicer, default_strategy,
+                                        self._portfolio_config, rebal_date)
+                    )
+                except Exception as exc:
+                    analyses.append({
+                        "symbol": sym_config["symbol"],
+                        "name": sym_config.get("name", sym_config["symbol"]),
+                        "eligible": False,
+                        "filters": [f"analysis_error:{exc}"],
+                        "industry": sym_config.get("industry", ""),
+                    })
+
+            market_view = _analyze_market_proxy(slicer, default_strategy, self._portfolio_config)
+            ranked = _rank_analyses(analyses, self._portfolio_config)
+
+            # 將目前持倉轉成 _select_positions 需要的格式
+            current_positions_for_select = {
+                sym: {"symbol": sym, "target_weight": w}
+                for sym, w in current_holdings.items()
+            }
+            selection = _select_positions(
+                ranked, current_positions_for_select, self._portfolio_config, market_view
+            )
+
+            # --- Step C: 扣除交易成本 ---
+            new_holdings: dict[str, float] = {
+                p["symbol"]: p["target_weight"] for p in selection["positions"]
+            }
+            turnover = self._one_way_turnover(current_holdings, new_holdings)
+            # round-trip cost = 買 + 賣各一次，每邊 = round_trip_cost / 2
+            # one-way turnover 代表換手的一邊，所以乘完整 round-trip
+            rebalance_cost = turnover * self._round_trip_cost
+            # 滑價：進出各一次
+            slippage_cost = turnover * 2 * (self._slippage_bps / 10000.0)
+            total_trade_cost = rebalance_cost + slippage_cost
+
+            if total_trade_cost > 0:
+                # 把交易成本記在再平衡當天（含首次建倉）
+                all_daily_returns.append(
+                    (pd.Timestamp(rebal_date, tz="UTC"), -total_trade_cost)
+                )
+
+            current_holdings = new_holdings
+
+            # 保存 snapshot
+            snapshot = {
+                "rebalance_date": rebal_date.isoformat(),
+                "market_signal": market_view["signal"],
+                "gross_exposure": selection["gross_exposure"],
+                "selected_count": len(selection["positions"]),
+                "one_way_turnover": round(turnover, 4),
+                "trade_cost": round(total_trade_cost, 6),
+                "positions": [
+                    {"symbol": p["symbol"], "weight": p["target_weight"], "score": p["score"]}
+                    for p in selection["positions"]
+                ],
+                "config_hash": compute_config_hash(self._portfolio_config),
+            }
+            monthly_snapshots.append(snapshot)
+
+        # --- 最後一期日頻報酬 ---
+        if current_holdings and rebalance_dates:
+            slicer.set_as_of(end_date)
+            final_rets = self._compute_daily_returns(
+                current_holdings, rebalance_dates[-1], end_date, slicer
+            )
+            all_daily_returns.extend(final_rets)
+
+        # --- 組合日頻報酬序列 ---
+        if all_daily_returns:
+            # 合併同一天的報酬（交易成本日與持倉報酬日可能重疊）
+            df_rets = pd.DataFrame(all_daily_returns, columns=["date", "return"])
+            df_rets = df_rets.groupby("date")["return"].sum()
+            portfolio_daily = df_rets.sort_index()
+        else:
+            portfolio_daily = pd.Series(dtype="float64")
+
+        # --- 計算 KPI ---
+        metrics = compute_metrics(portfolio_daily, benchmark_daily)
+        report = format_report(metrics, benchmark_symbol)
+
+        # 補充換手率與交易成本統計
+        total_turnover = sum(s.get("one_way_turnover", 0) for s in monthly_snapshots)
+        total_cost = sum(s.get("trade_cost", 0) for s in monthly_snapshots)
+        n_rebalances = len(monthly_snapshots)
+        metrics["total_one_way_turnover"] = round(total_turnover, 4)
+        metrics["total_trade_cost"] = round(total_cost, 6)
+        metrics["avg_turnover_per_rebalance"] = round(
+            total_turnover / n_rebalances if n_rebalances else 0, 4
+        )
+        metrics["n_rebalances"] = n_rebalances
+
+        logger.info("\n%s", report)
+
+        return {
+            "metrics": metrics,
+            "report": report,
+            "monthly_snapshots": monthly_snapshots,
+            "portfolio_returns": portfolio_daily,
+            "benchmark_returns": benchmark_daily,
+        }
+
+    def _compute_daily_returns(
+        self,
+        holdings: dict[str, float],
+        period_start: datetime,
+        period_end: datetime,
+        slicer: _DataSlicer,
+    ) -> list[tuple[pd.Timestamp, float]]:
+        """計算一個持有期間的日頻加權報酬序列。
+
+        假設在 period_start 次一交易日以收盤價成交，
+        之後每日以收盤價計算報酬，直到 period_end。
+        """
+        start_ts = pd.Timestamp(period_start, tz="UTC")
+        end_ts = pd.Timestamp(period_end, tz="UTC")
+
+        # 收集每個持倉的日報酬
+        stock_daily_returns: dict[str, pd.Series] = {}
+        for symbol, weight in holdings.items():
+            if weight <= 0:
+                continue
+            df = slicer.fetch_ohlcv(symbol, "D", 2000)
+            if df is None or df.empty:
+                continue
+
+            # 取 period_start 之後到 period_end 的資料
+            period_df = df[(df.index > start_ts) & (df.index <= end_ts)]
+            if len(period_df) < 2:
+                continue
+
+            daily_ret = period_df["close"].pct_change().dropna()
+            stock_daily_returns[symbol] = daily_ret
+
+        if not stock_daily_returns:
+            return []
+
+        # 建立日頻加權報酬
+        ret_df = pd.DataFrame(stock_daily_returns)
+        # 用持倉權重加權
+        weights = pd.Series(holdings)
+        # 只取有資料的 symbol
+        common = weights.index.intersection(ret_df.columns)
+        if common.empty:
+            return []
+
+        w = weights[common]
+        w_sum = w.sum()
+        if w_sum <= 0:
+            return []
+
+        # 歸一化權重（投資部分）
+        portfolio_ret = (ret_df[common] * w).sum(axis=1)
+
+        return [(date, ret) for date, ret in portfolio_ret.items()]
+
+    @staticmethod
+    def _one_way_turnover(
+        old: dict[str, float], new: dict[str, float]
+    ) -> float:
+        """計算 one-way turnover: 0.5 * sum(|new_w - old_w|)。"""
+        all_symbols = set(old) | set(new)
+        gross = sum(abs(new.get(s, 0) - old.get(s, 0)) for s in all_symbols)
+        return gross / 2.0
+
+    @staticmethod
+    def _generate_rebalance_dates(
+        start: datetime, end: datetime, day: int
+    ) -> list[datetime]:
+        """產生回測期間內所有再平衡日期。"""
+        dates = []
+        current = start.replace(day=min(day, 28))
+        if current < start:
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+
+        while current <= end:
+            dates.append(current)
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+
+        return dates

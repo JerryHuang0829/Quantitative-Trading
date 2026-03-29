@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Logs
+bot.log
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Data & Reports (generated artifacts)
+data/*.db
+data/signals.db
+reports/
+
+# IDE
+.vscode/
+.idea/

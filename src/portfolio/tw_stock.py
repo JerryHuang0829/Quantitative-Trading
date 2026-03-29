@@ -1,0 +1,1168 @@
+"""Taiwan stock portfolio construction and monthly rebalance logic."""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from math import isfinite
+
+from ..storage.database import compute_config_hash
+
+import pandas as pd
+
+from ..features.institutional import score_institutional
+from ..strategy.indicators import calculate_indicators
+from ..strategy.regime import detect_regime, get_regime_display
+from ..utils.constants import TW_TZ
+
+logger = logging.getLogger(__name__)
+
+# 台股個股來回交易成本 ≈ 0.47%（手續費 0.1425% x2 + 證交稅 0.3% 賣出）
+TW_STOCK_ROUND_TRIP_COST = 0.0047
+
+DEFAULT_PORTFOLIO_CONFIG = {
+    "profile": None,
+    "profile_label": "custom",
+    "target_holding_months": None,
+    "enabled": True,
+    "rebalance_frequency": "monthly",
+    "rebalance_day": 5,
+    "rebalance_after_close_hour": 14,
+    "top_n": 5,
+    "hold_buffer": 2,
+    "hold_score_floor": 55.0,
+    "max_position_weight": 0.20,
+    "market_proxy_symbol": "0050",
+    "history_limit": 320,
+    "monthly_revenue_months": 15,
+    "min_price": 20.0,
+    "min_avg_turnover": 50_000_000.0,
+    "exclude_etf": True,
+    "use_monthly_revenue": True,
+    "use_auto_universe": True,
+    "auto_universe_size": 80,
+    "auto_universe_markets": ["twse", "tpex"],
+    "auto_universe_exclude_industries": [
+        "ETF",
+        "ETN",
+        "受益證券",
+        "存託憑證",
+        "權證",
+    ],
+    "auto_universe_include_symbols": [],
+    "auto_universe_exclude_symbols": [],
+    "exposure": {
+        "risk_on": 1.0,
+        "caution": 0.7,
+        "risk_off": 0.35,
+    },
+    "score_weights": {
+        "price_momentum": 0.45,
+        "trend_quality": 0.25,
+        "revenue_momentum": 0.20,
+        "institutional_flow": 0.10,
+    },
+    # 交易成本相關
+    "turnover_cost": TW_STOCK_ROUND_TRIP_COST,
+    "turnover_score_threshold": 5.0,  # 新股 score 需超過被替換股至少 N 分才換倉
+    # 產業分散
+    "max_same_industry": 2,  # 同產業最多持有 N 檔
+    # 權重分配模式: "equal" | "score_weighted"
+    "weight_mode": "score_weighted",
+    # 安全閥
+    "min_eligible_ratio": 0.3,  # 至少 30% 候選股分析成功才執行再平衡
+}
+
+PORTFOLIO_PROFILES = {
+    "tw_3m_stable": {
+        "label": "Taiwan 3M Stable",
+        "target_holding_months": 3,
+        "rebalance_day": 12,
+        "top_n": 8,
+        "hold_buffer": 3,
+        "hold_score_floor": 60.0,
+        "max_position_weight": 0.12,
+        "turnover_score_threshold": 6.0,
+        "max_same_industry": 2,
+        "exposure": {
+            "risk_on": 0.96,
+            "caution": 0.70,
+            "risk_off": 0.35,
+        },
+        "score_weights": {
+            "price_momentum": 0.45,
+            "trend_quality": 0.20,
+            "revenue_momentum": 0.25,
+            "institutional_flow": 0.10,
+        },
+    },
+    "tw_6m_defensive": {
+        "label": "Taiwan 6M Defensive",
+        "target_holding_months": 6,
+        "rebalance_day": 12,
+        "top_n": 10,
+        "hold_buffer": 4,
+        "hold_score_floor": 62.0,
+        "max_position_weight": 0.10,
+        "turnover_score_threshold": 8.0,
+        "max_same_industry": 2,
+        "exposure": {
+            "risk_on": 1.0,
+            "caution": 0.70,
+            "risk_off": 0.35,
+        },
+        "score_weights": {
+            "price_momentum": 0.40,
+            "trend_quality": 0.20,
+            "revenue_momentum": 0.30,
+            "institutional_flow": 0.10,
+        },
+    },
+}
+
+
+def get_portfolio_config(config: dict) -> dict:
+    """Merge defaults with user config."""
+    user_config = config.get("portfolio", {})
+    profile_name = user_config.get("profile")
+    profile = PORTFOLIO_PROFILES.get(profile_name, {})
+    if profile_name and not profile:
+        logger.warning("Unknown portfolio profile '%s'; using custom overrides only", profile_name)
+
+    merged = DEFAULT_PORTFOLIO_CONFIG.copy()
+    merged.update({k: v for k, v in profile.items() if k not in {"label", "exposure", "score_weights"}})
+    merged.update({k: v for k, v in user_config.items() if k not in {"exposure", "score_weights"}})
+    merged["profile"] = profile_name
+    merged["profile_label"] = profile.get("label", "custom")
+    merged["exposure"] = {
+        **DEFAULT_PORTFOLIO_CONFIG["exposure"],
+        **profile.get("exposure", {}),
+        **user_config.get("exposure", {}),
+    }
+    merged["score_weights"] = {
+        **DEFAULT_PORTFOLIO_CONFIG["score_weights"],
+        **profile.get("score_weights", {}),
+        **user_config.get("score_weights", {}),
+    }
+    return merged
+
+
+def should_rebalance_now(portfolio_config: dict, db, source) -> tuple[bool, str]:
+    """Return whether the monthly rebalance should run now."""
+    now = datetime.now(TW_TZ)
+
+    if not portfolio_config.get("enabled", True):
+        return False, "portfolio disabled"
+
+    if portfolio_config.get("rebalance_frequency", "monthly") != "monthly":
+        return False, "only monthly rebalance is supported"
+
+    if now.weekday() >= 5:
+        return False, "weekend"
+
+    # 使用 FinMindSource 的假日判斷（如果可用）
+    if hasattr(source, "is_trading_day") and not source.is_trading_day():
+        return False, "holiday"
+
+    if now.day < int(portfolio_config.get("rebalance_day", 5)):
+        return False, "before rebalance day"
+
+    if now.hour < int(portfolio_config.get("rebalance_after_close_hour", 14)):
+        return False, "before market close window"
+
+    if source.is_market_open():
+        return False, "market still open"
+
+    month_key = now.strftime("%Y-%m")
+    if db.has_portfolio_rebalance("tw_stock", month_key):
+        return False, f"already rebalanced for {month_key}"
+
+    return True, "rebalance window open"
+
+
+def build_tw_stock_universe(config: dict, source, portfolio_config: dict) -> list[dict]:
+    """Build the Taiwan stock universe from auto-universe + manual overrides."""
+    manual_entries = {
+        item["symbol"]: item
+        for item in config.get("symbols", [])
+        if item.get("market") == "tw_stock" and item.get("source") == "finmind"
+    }
+    manual_enabled = [
+        item
+        for item in manual_entries.values()
+        if item.get("enabled", False)
+    ]
+
+    if not portfolio_config.get("use_auto_universe", True):
+        return manual_enabled
+
+    stock_info = source.fetch_stock_info() if hasattr(source, "fetch_stock_info") else None
+    if stock_info is None or stock_info.empty:
+        logger.warning("Auto universe unavailable; falling back to manual symbols")
+        return manual_enabled
+
+    market_value = source.fetch_market_value() if hasattr(source, "fetch_market_value") else None
+    candidates = _prepare_auto_universe(stock_info, market_value, portfolio_config)
+    if not candidates:
+        # market_value API 可能需付費；用 close×volume 做 size proxy fallback
+        logger.warning("market_value API failed; attempting size proxy from close×volume")
+        candidates = _prepare_auto_universe_by_size_proxy(
+            stock_info, source, portfolio_config
+        )
+    if not candidates:
+        logger.warning("Auto universe returned no candidates; falling back to manual symbols")
+        return manual_enabled
+
+    universe: list[dict] = []
+    seen: set[str] = set()
+    for row in candidates:
+        symbol = row["symbol"]
+        override = manual_entries.get(symbol, {})
+        if symbol in manual_entries and override.get("enabled") is False:
+            continue
+        universe.append(
+            {
+                "name": override.get("name", row["name"]),
+                "market": "tw_stock",
+                "source": "finmind",
+                "symbol": symbol,
+                "timeframe": override.get("timeframe", "D"),
+                "enabled": True,
+                "strategy": override.get("strategy", {}),
+                "industry": row.get("industry", ""),
+            }
+        )
+        seen.add(symbol)
+
+    for item in manual_enabled:
+        if item["symbol"] in seen:
+            continue
+        universe.append(item)
+
+    return universe
+
+
+def run_tw_stock_portfolio_rebalance(
+    config: dict,
+    source,
+    db,
+    portfolio_config: dict,
+) -> dict | None:
+    """Build a Taiwan stock portfolio snapshot and target weights."""
+    as_of = datetime.now(TW_TZ)
+    universe = build_tw_stock_universe(config, source, portfolio_config)
+    if not universe:
+        logger.warning("No enabled Taiwan stock symbols configured")
+        return None
+
+    default_strategy = config.get("default_strategy", {})
+    analyses: list[dict] = []
+    for sym_config in universe:
+        try:
+            analyses.append(_analyze_symbol(sym_config, source, default_strategy, portfolio_config, as_of))
+        except Exception as exc:
+            logger.warning("Failed to analyze %s: %s", sym_config["symbol"], exc)
+            analyses.append(
+                {
+                    "symbol": sym_config["symbol"],
+                    "name": sym_config.get("name", sym_config["symbol"]),
+                    "eligible": False,
+                    "filters": [f"analysis_error:{exc}"],
+                    "industry": sym_config.get("industry", ""),
+                }
+            )
+
+    # 安全閥：分析成功率太低時不執行再平衡
+    min_eligible_ratio = float(portfolio_config.get("min_eligible_ratio", 0.3))
+    success_count = sum(1 for a in analyses if "analysis_error" not in str(a.get("filters", [])))
+    if len(analyses) > 0 and success_count / len(analyses) < min_eligible_ratio:
+        logger.error(
+            "Only %d/%d symbols analyzed successfully (%.0f%%), below threshold %.0f%%. Skipping rebalance.",
+            success_count, len(analyses),
+            success_count / len(analyses) * 100,
+            min_eligible_ratio * 100,
+        )
+        return None
+
+    market_view = _analyze_market_proxy(source, default_strategy, portfolio_config)
+    ranked = _rank_analyses(analyses, portfolio_config)
+    current_positions = {
+        row["symbol"]: row
+        for row in db.get_portfolio_positions("tw_stock")
+    }
+    selection = _select_positions(ranked, current_positions, portfolio_config, market_view)
+
+    top_preview = [
+        {
+            "rank": item["rank"],
+            "symbol": item["symbol"],
+            "name": item["name"],
+            "score": item["portfolio_score"],
+            "regime": item.get("regime", ""),
+            "momentum_12_1": item.get("momentum_12_1"),
+            "revenue_yoy": item.get("revenue_yoy"),
+        }
+        for item in ranked[: min(10, len(ranked))]
+    ]
+
+    # P0-4: 完整 ranked universe（每檔因子原始值 + percentile + 篩選結果）
+    full_ranked = [
+        {
+            "rank": item.get("rank"),
+            "symbol": item["symbol"],
+            "name": item.get("name", ""),
+            "industry": item.get("industry", ""),
+            "eligible": item.get("eligible", False),
+            "filters": item.get("filters", []),
+            "portfolio_score": item.get("portfolio_score", 0),
+            "rank_components": item.get("rank_components", {}),
+            "price_momentum_raw": item.get("price_momentum_raw"),
+            "trend_quality_raw": item.get("trend_quality_raw"),
+            "revenue_raw": item.get("revenue_raw"),
+            "institutional_raw": item.get("institutional_raw"),
+            "momentum_12_1": item.get("momentum_12_1"),
+            "revenue_yoy": item.get("revenue_yoy"),
+            "close": item.get("close"),
+        }
+        for item in ranked
+    ]
+
+    # P0-4: universe snapshot（記錄本次分析的 universe 組成）
+    universe_snapshot = [
+        {"symbol": sym["symbol"], "name": sym.get("name", ""), "industry": sym.get("industry", "")}
+        for sym in universe
+    ]
+
+    # P0-4: config hash
+    config_hash = compute_config_hash(portfolio_config)
+
+    snapshot = {
+        "market": "tw_stock",
+        "strategy_mode": "tw_stock_portfolio",
+        "portfolio_profile": portfolio_config.get("profile"),
+        "portfolio_profile_label": portfolio_config.get("profile_label", "custom"),
+        "target_holding_months": portfolio_config.get("target_holding_months"),
+        "rebalance_date": as_of.strftime("%Y-%m-%d"),
+        "month_key": as_of.strftime("%Y-%m"),
+        "market_regime": market_view["regime"],
+        "market_regime_display": market_view["regime_display"],
+        "market_signal": market_view["signal"],
+        "market_proxy_symbol": market_view["symbol"],
+        "gross_exposure": selection["gross_exposure"],
+        "cash_weight": selection["cash_weight"],
+        "total_candidates": len(analyses),
+        "eligible_candidates": len([item for item in ranked if item.get("eligible")]),
+        "selected_count": len(selection["positions"]),
+        "positions": selection["positions"],
+        "entries": selection["entries"],
+        "holds": selection["holds"],
+        "exits": selection["exits"],
+        "ranking": top_preview,
+        "notes": selection["notes"]
+        + [
+            f"profile={portfolio_config.get('profile') or 'custom'}",
+            f"profile_label={portfolio_config.get('profile_label', 'custom')}",
+            f"target_holding_months={portfolio_config.get('target_holding_months')}",
+            f"universe_mode={'auto' if portfolio_config.get('use_auto_universe', True) else 'manual'}",
+            f"universe_size={len(universe)}",
+            f"analysis_success_rate={success_count}/{len(analyses)}",
+        ],
+        # P0-4: 研究可重現性欄位
+        "config_hash": config_hash,
+        "strategy_version": f"{portfolio_config.get('profile', 'custom')}@{config_hash}",
+        "full_ranked": full_ranked,
+        "universe_snapshot": universe_snapshot,
+        "data_as_of": as_of.isoformat(),
+        "fallback_notes": [],
+    }
+    return snapshot
+
+
+def _analyze_market_proxy(source, default_strategy: dict, portfolio_config: dict) -> dict:
+    """Estimate Taiwan market risk state using a proxy ETF."""
+    symbol = portfolio_config.get("market_proxy_symbol", "0050")
+    limit = max(int(portfolio_config.get("history_limit", 320)), 120)
+    strategy = {**default_strategy}
+    df = source.fetch_ohlcv(symbol, "D", limit)
+    if df is None or len(df) < max(strategy.get("sma_slow", 60), 60):
+        return {
+            "symbol": symbol,
+            "regime": "ranging",
+            "regime_display": get_regime_display("ranging"),
+            "signal": "caution",
+        }
+
+    df = calculate_indicators(df, strategy)
+    latest = df.iloc[-1]
+    regime = detect_regime(df)
+    close = float(latest["close"])
+    sma_fast = float(latest.get("sma_fast", close))
+    sma_slow = float(latest.get("sma_slow", close))
+
+    if close < sma_slow or regime == "trending_down":
+        signal = "risk_off"
+    elif close < sma_fast or regime == "ranging":
+        signal = "caution"
+    else:
+        signal = "risk_on"
+
+    return {
+        "symbol": symbol,
+        "regime": regime,
+        "regime_display": get_regime_display(regime),
+        "signal": signal,
+    }
+
+
+def _prepare_auto_universe(stock_info: pd.DataFrame, market_value: pd.DataFrame | None, portfolio_config: dict) -> list[dict]:
+    """Pre-filter the full market into a tradable universe."""
+    working = stock_info.copy()
+    if "stock_id" not in working.columns:
+        return []
+
+    working["stock_id"] = working["stock_id"].astype(str).str.strip()
+    # 保留 4 位股票代碼，以及 00xxxx 類 6 位 ETF 家族代碼。
+    # 這讓 0050 / 006208 的行為和回測路徑一致，同時排除 71xxxx 等權證。
+    working = working[working["stock_id"].str.fullmatch(r"(?:\d{4}|00\d{4})")]
+
+    include_symbols = {
+        str(symbol)
+        for symbol in portfolio_config.get("auto_universe_include_symbols", [])
+    }
+    exclude_symbols = {
+        str(symbol)
+        for symbol in portfolio_config.get("auto_universe_exclude_symbols", [])
+    }
+    if include_symbols:
+        working = working[working["stock_id"].isin(include_symbols)]
+    if exclude_symbols:
+        working = working[~working["stock_id"].isin(exclude_symbols)]
+
+    if portfolio_config.get("exclude_etf", True):
+        working = working[~working["stock_id"].str.startswith("00")]
+
+    allowed_markets = {
+        str(item).lower()
+        for item in portfolio_config.get("auto_universe_markets", ["twse", "tpex"])
+    }
+    if allowed_markets and "type" in working.columns:
+        working = working[
+            working["type"].astype(str).str.lower().apply(
+                lambda value: any(token in value for token in allowed_markets)
+            )
+        ]
+
+    excluded_industries = [
+        str(item).lower()
+        for item in portfolio_config.get("auto_universe_exclude_industries", [])
+    ]
+    if excluded_industries and "industry_category" in working.columns:
+        working = working[
+            ~working["industry_category"].astype(str).str.lower().apply(
+                lambda value: any(keyword in value for keyword in excluded_industries)
+            )
+        ]
+
+    latest_market_value = None
+    if market_value is not None and not market_value.empty and {"stock_id", "market_value"}.issubset(market_value.columns):
+        mv = market_value.copy()
+        if "date" in mv.columns:
+            mv["date"] = pd.to_datetime(mv["date"])
+            mv = mv.sort_values(["stock_id", "date"])
+        latest_market_value = (
+            mv.dropna(subset=["market_value"])
+            .groupby("stock_id", as_index=False)
+            .tail(1)[["stock_id", "market_value"]]
+        )
+        working = working.merge(latest_market_value, on="stock_id", how="left")
+        working["market_value"] = pd.to_numeric(working["market_value"], errors="coerce")
+        working = working.sort_values(["market_value", "stock_id"], ascending=[False, True])
+    else:
+        # P0-1 fix: fail-closed — 沒有市值資料時不應退化為股票代號排序
+        logger.error(
+            "market_value data unavailable — refusing to build auto universe "
+            "with stock_id sort fallback (would change strategy character)"
+        )
+        return []
+
+    limit = int(portfolio_config.get("auto_universe_size", 80) or 0)
+    if limit > 0:
+        working = working.head(limit)
+
+    result = []
+    for _, row in working.iterrows():
+        result.append(
+            {
+                "symbol": str(row["stock_id"]),
+                "name": str(row.get("stock_name", row["stock_id"])),
+                "market_value": _float_or_none(row.get("market_value")),
+                "industry": str(row.get("industry_category", "")),
+                "type": str(row.get("type", "")),
+            }
+        )
+    return result
+
+
+def _prepare_auto_universe_by_size_proxy(
+    stock_info: pd.DataFrame, source, portfolio_config: dict
+) -> list[dict]:
+    """Fallback: 用 close×volume 20日均值取代付費 market_value API 做 size 排序。"""
+    working = stock_info.copy()
+    if "stock_id" not in working.columns:
+        return []
+
+    working["stock_id"] = working["stock_id"].astype(str).str.strip()
+    working = working[working["stock_id"].str.fullmatch(r"(?:\d{4}|00\d{4})")]
+
+    if portfolio_config.get("exclude_etf", True):
+        working = working[~working["stock_id"].str.startswith("00")]
+
+    allowed_markets = {
+        str(item).lower()
+        for item in portfolio_config.get("auto_universe_markets", ["twse", "tpex"])
+    }
+    if allowed_markets and "type" in working.columns:
+        working = working[
+            working["type"].astype(str).str.lower().apply(
+                lambda value: any(token in value for token in allowed_markets)
+            )
+        ]
+
+    excluded_industries = [
+        str(item).lower()
+        for item in portfolio_config.get("auto_universe_exclude_industries", [])
+    ]
+    if excluded_industries and "industry_category" in working.columns:
+        working = working[
+            ~working["industry_category"].astype(str).str.lower().apply(
+                lambda value: any(keyword in value for keyword in excluded_industries)
+            )
+        ]
+
+    include_symbols = {
+        str(s) for s in portfolio_config.get("auto_universe_include_symbols", [])
+    }
+    exclude_symbols = {
+        str(s) for s in portfolio_config.get("auto_universe_exclude_symbols", [])
+    }
+    if include_symbols:
+        working = working[working["stock_id"].isin(include_symbols)]
+    if exclude_symbols:
+        working = working[~working["stock_id"].isin(exclude_symbols)]
+
+    # 計算 size proxy: close × volume 的 20 日均值
+    size_proxy: dict[str, float] = {}
+    for _, row in working.iterrows():
+        sym = str(row["stock_id"])
+        try:
+            df = source.fetch_ohlcv(sym, "D", 30)
+            if df is not None and len(df) >= 5:
+                turnover = (df["close"] * df["volume"]).tail(20).mean()
+                size_proxy[sym] = float(turnover) if pd.notna(turnover) else 0.0
+            else:
+                size_proxy[sym] = 0.0
+        except Exception:
+            size_proxy[sym] = 0.0
+
+    working["_size_proxy"] = working["stock_id"].map(size_proxy).fillna(0.0)
+    working = working.sort_values(["_size_proxy", "stock_id"], ascending=[False, True])
+
+    limit = int(portfolio_config.get("auto_universe_size", 80) or 0)
+    if limit > 0:
+        working = working.head(limit)
+
+    result = []
+    for _, row in working.iterrows():
+        result.append(
+            {
+                "symbol": str(row["stock_id"]),
+                "name": str(row.get("stock_name", row["stock_id"])),
+                "market_value": row["_size_proxy"],
+                "industry": str(row.get("industry_category", "")),
+                "type": str(row.get("type", "")),
+            }
+        )
+    logger.info(
+        "Built universe via size proxy (close×volume): %d candidates", len(result)
+    )
+    return result
+
+
+def _analyze_symbol(
+    sym_config: dict,
+    source,
+    default_strategy: dict,
+    portfolio_config: dict,
+    as_of: datetime,
+) -> dict:
+    """Analyze one stock and return raw factors used by the portfolio ranker."""
+    symbol = sym_config["symbol"]
+    name = sym_config.get("name", symbol)
+    industry = sym_config.get("industry", "")
+    history_limit = max(
+        int(portfolio_config.get("history_limit", 320)),
+        int(default_strategy.get("sma_slow", 60)) + 30,
+    )
+    strategy = {**default_strategy, **sym_config.get("strategy", {})}
+
+    df = source.fetch_ohlcv(symbol, "D", history_limit)
+    if df is None or len(df) < 274:
+        return {
+            "symbol": symbol,
+            "name": name,
+            "industry": industry,
+            "eligible": False,
+            "filters": ["insufficient_history"],
+        }
+
+    df = calculate_indicators(df, strategy)
+    regime = detect_regime(df)
+    latest = df.iloc[-1]
+
+    close = float(latest["close"])
+    sma_fast = _float_or_none(latest.get("sma_fast"))
+    sma_slow = _float_or_none(latest.get("sma_slow"))
+    structure = int(latest.get("structure", 0) or 0)
+
+    avg_turnover_20 = float((df["close"] * df["volume"]).tail(20).mean())
+    momentum_3m = _period_return(df["close"], 63)
+    momentum_6m = _period_return(df["close"], 126)
+    momentum_12m = _period_return(df["close"], 252)
+    momentum_12_1 = _skip_period_return(df["close"], 252, 21)
+
+    price_momentum_raw = _weighted_average(
+        [
+            (momentum_3m, 0.20),
+            (momentum_6m, 0.35),
+            (momentum_12_1, 0.45),
+        ]
+    )
+    trend_quality_raw = _trend_quality(close, sma_fast, sma_slow, structure, regime)
+
+    institutional_result = {"score": 0, "detail": "disabled"}
+    if strategy.get("use_institutional", True) and hasattr(source, "fetch_institutional"):
+        institutional_df = source.fetch_institutional(symbol)
+        institutional_result = score_institutional(institutional_df)
+    institutional_raw = float(institutional_result.get("score", 0)) / 100.0
+
+    revenue_yoy = None
+    revenue_accel = None
+    revenue_raw = None
+    if portfolio_config.get("use_monthly_revenue", True) and hasattr(source, "fetch_month_revenue"):
+        revenue_df = source.fetch_month_revenue(
+            symbol,
+            months=int(portfolio_config.get("monthly_revenue_months", 15)),
+        )
+        revenue_yoy, revenue_accel, revenue_raw = _monthly_revenue_momentum(revenue_df, as_of)
+
+    filters: list[str] = []
+    if portfolio_config.get("exclude_etf", True) and str(symbol).startswith("00"):
+        filters.append("etf_excluded")
+    if close < float(portfolio_config.get("min_price", 20.0)):
+        filters.append("price_below_floor")
+    if avg_turnover_20 < float(portfolio_config.get("min_avg_turnover", 50_000_000.0)):
+        filters.append("turnover_too_low")
+    if sma_slow is None or close <= sma_slow:
+        filters.append("below_sma_slow")
+    if sma_fast is None or sma_slow is None or sma_fast <= sma_slow:
+        filters.append("trend_not_aligned")
+    if momentum_6m is None or momentum_6m <= 0:
+        filters.append("momentum_6m_non_positive")
+
+    return {
+        "symbol": symbol,
+        "name": name,
+        "industry": industry,
+        "close": close,
+        "regime": regime,
+        "regime_display": get_regime_display(regime),
+        "avg_turnover_20": avg_turnover_20,
+        "momentum_3m": momentum_3m,
+        "momentum_6m": momentum_6m,
+        "momentum_12m": momentum_12m,
+        "momentum_12_1": momentum_12_1,
+        "price_momentum_raw": price_momentum_raw,
+        "trend_quality_raw": trend_quality_raw,
+        "revenue_yoy": revenue_yoy,
+        "revenue_accel": revenue_accel,
+        "revenue_raw": revenue_raw,
+        "institutional_raw": institutional_raw,
+        "institutional_detail": institutional_result.get("detail", ""),
+        "eligible": len(filters) == 0,
+        "filters": filters,
+    }
+
+
+def _rank_analyses(analyses: list[dict], portfolio_config: dict) -> list[dict]:
+    """Attach percentile-ranked factor scores and total portfolio score."""
+    if not analyses:
+        return []
+
+    score_weights = portfolio_config.get("score_weights", {})
+    ranked = [dict(item) for item in analyses]
+
+    # 只在可交易 universe 內做百分位排名，避免 ineligible 股票稀釋分數
+    eligible_items = [item for item in ranked if item.get("eligible", False)]
+    ineligible_items = [item for item in ranked if not item.get("eligible", False)]
+    logger.info(
+        "Ranking %d eligible stocks (excluded %d ineligible from ranking pool)",
+        len(eligible_items), len(ineligible_items),
+    )
+
+    available_metrics = {
+        "price_momentum": "price_momentum_raw",
+        "trend_quality": "trend_quality_raw",
+        "revenue_momentum": "revenue_raw",
+        "institutional_flow": "institutional_raw",
+    }
+
+    metric_ranks: dict[str, dict[str, float]] = {}
+    active_weights: dict[str, float] = {}
+    for score_name, metric_key in available_metrics.items():
+        weight = float(score_weights.get(score_name, 0))
+        if weight <= 0:
+            continue
+        ranks, has_real_data = _metric_ranks(eligible_items, metric_key)
+        metric_ranks[score_name] = ranks
+        if has_real_data:
+            active_weights[score_name] = weight
+
+    weight_sum = sum(active_weights.values()) or 1.0
+    for item in eligible_items:
+        symbol = item["symbol"]
+        score_total = 0.0
+        components = {}
+        for score_name, weight in active_weights.items():
+            rank_value = metric_ranks[score_name].get(symbol, 0.5)
+            components[score_name] = round(rank_value * 100.0, 2)
+            score_total += rank_value * weight
+        item["rank_components"] = components
+        item["portfolio_score"] = round((score_total / weight_sum) * 100.0, 2)
+
+    for item in ineligible_items:
+        item["rank_components"] = {}
+        item["portfolio_score"] = 0.0
+
+    all_ranked = eligible_items + ineligible_items
+    all_ranked.sort(
+        key=lambda item: (
+            not item.get("eligible", False),
+            -(item.get("portfolio_score") or 0.0),
+            -(item.get("trend_quality_raw") or 0.0),
+        )
+    )
+
+    for index, item in enumerate(all_ranked, start=1):
+        item["rank"] = index
+
+    return all_ranked
+
+
+def _select_positions(
+    ranked: list[dict],
+    current_positions: dict[str, dict],
+    portfolio_config: dict,
+    market_view: dict,
+) -> dict:
+    """Convert ranked candidates into target positions with turnover penalty and industry limits."""
+    top_n = int(portfolio_config.get("top_n", 5))
+    hold_buffer = int(portfolio_config.get("hold_buffer", 2))
+    hold_score_floor = float(portfolio_config.get("hold_score_floor", 55.0))
+    max_same_industry = int(portfolio_config.get("max_same_industry", 2))
+    turnover_score_threshold = float(portfolio_config.get("turnover_score_threshold", 5.0))
+
+    eligible = [item for item in ranked if item.get("eligible")]
+    rank_by_symbol = {item["symbol"]: item["rank"] for item in ranked}
+    score_by_symbol = {item["symbol"]: item.get("portfolio_score", 0) for item in ranked}
+    industry_by_symbol = {item["symbol"]: item.get("industry", "") for item in ranked}
+
+    selected: list[dict] = []
+    selected_symbols: set[str] = set()
+
+    # Step 1: 保留現有持倉（hold buffer 內且達標）
+    for symbol, previous in current_positions.items():
+        candidate = next((item for item in eligible if item["symbol"] == symbol), None)
+        if candidate is None:
+            continue
+        if rank_by_symbol[symbol] <= top_n + hold_buffer and candidate["portfolio_score"] >= hold_score_floor:
+            selected.append(candidate)
+            selected_symbols.add(symbol)
+
+    selected.sort(key=lambda item: item["rank"])
+    if len(selected) > top_n:
+        selected = selected[:top_n]
+        selected_symbols = {item["symbol"] for item in selected}
+
+    # Step 1.5: 產業硬限制 — 超額產業中分數最低者移除
+    if max_same_industry > 0:
+        industry_groups: dict[str, list[dict]] = {}
+        for item in selected:
+            ind = item.get("industry", "")
+            if ind:
+                industry_groups.setdefault(ind, []).append(item)
+
+        to_remove: set[str] = set()
+        for industry, members in industry_groups.items():
+            if len(members) <= max_same_industry:
+                continue
+            members.sort(key=lambda x: x.get("portfolio_score", 0))
+            excess = len(members) - max_same_industry
+            for i in range(excess):
+                to_remove.add(members[i]["symbol"])
+                logger.info(
+                    "Industry limit: removing %s (%s, score=%.1f) — %s exceeds limit of %d",
+                    members[i]["symbol"], members[i].get("name", ""),
+                    members[i].get("portfolio_score", 0),
+                    industry, max_same_industry,
+                )
+
+        if to_remove:
+            selected = [item for item in selected if item["symbol"] not in to_remove]
+            selected_symbols -= to_remove
+
+    # Step 2: 填入新候選，考慮交易成本門檻 + 產業分散
+    _used_replaceable: set[str] = set()  # P0-7: 追蹤已配對的 replaceable 持股
+    for candidate in eligible:
+        if len(selected) >= top_n:
+            break
+        if candidate["symbol"] in selected_symbols:
+            continue
+
+        # 產業分散檢查
+        candidate_industry = candidate.get("industry", "")
+        if candidate_industry and max_same_industry > 0:
+            same_industry_count = sum(
+                1 for s in selected
+                if s.get("industry", "") == candidate_industry and candidate_industry != ""
+            )
+            if same_industry_count >= max_same_industry:
+                continue
+
+        # P0-7 fix: 交易成本門檻 — 逐一配對比較，每次選入後移除已配對的 replaceable
+        if current_positions:
+            replaceable = [
+                (sym, score_by_symbol.get(sym, 0))
+                for sym in current_positions
+                if sym not in selected_symbols and sym not in _used_replaceable
+            ]
+            if replaceable:
+                # 取剩餘 replaceable 中分數最低者做配對
+                weakest_sym, weakest_score = min(replaceable, key=lambda x: x[1])
+                if candidate["portfolio_score"] < weakest_score + turnover_score_threshold:
+                    continue  # 優勢不夠大，不值得換倉
+                _used_replaceable.add(weakest_sym)
+
+        selected.append(candidate)
+        selected_symbols.add(candidate["symbol"])
+
+    selected.sort(key=lambda item: item["rank"])
+
+    # 計算曝險
+    exposure = float(
+        portfolio_config.get("exposure", {}).get(
+            market_view["signal"],
+            DEFAULT_PORTFOLIO_CONFIG["exposure"]["caution"],
+        )
+    )
+
+    # 權重分配
+    weight_mode = portfolio_config.get("weight_mode", "score_weighted")
+    position_weights = _calculate_position_weights(
+        selected, exposure,
+        float(portfolio_config.get("max_position_weight", 0.20)),
+        weight_mode,
+    )
+
+    positions = []
+    entries = []
+    holds = []
+    exits = []
+    total_weight = 0.0
+
+    for candidate in selected:
+        symbol = candidate["symbol"]
+        previous = current_positions.get(symbol)
+        target_weight = position_weights.get(symbol, 0.0)
+        total_weight += target_weight
+
+        action = "ENTER"
+        if previous is not None:
+            previous_weight = float(previous.get("target_weight", 0) or 0)
+            if target_weight < previous_weight - 0.005:
+                action = "REDUCE"
+            elif target_weight > previous_weight + 0.005:
+                action = "ADD"
+            else:
+                action = "HOLD"
+
+        position = {
+            "symbol": symbol,
+            "name": candidate["name"],
+            "industry": candidate.get("industry", ""),
+            "target_weight": target_weight,
+            "rank": candidate["rank"],
+            "score": candidate["portfolio_score"],
+            "action": action,
+            "close": candidate.get("close"),
+            "regime": candidate.get("regime", ""),
+            "regime_display": candidate.get("regime_display", ""),
+            "momentum_12_1": candidate.get("momentum_12_1"),
+            "revenue_yoy": candidate.get("revenue_yoy"),
+            "institutional_detail": candidate.get("institutional_detail", ""),
+        }
+        positions.append(position)
+
+        if action == "ENTER":
+            entries.append(position)
+        else:
+            holds.append(position)
+
+    for symbol, previous in current_positions.items():
+        if symbol in selected_symbols:
+            continue
+        exits.append(
+            {
+                "symbol": symbol,
+                "name": previous.get("name", symbol),
+                "previous_weight": float(previous.get("target_weight", 0) or 0),
+            }
+        )
+
+    # 估算換倉成本，納入 ENTER / EXIT / ADD / REDUCE 的實際權重變化
+    turnover_cost = float(portfolio_config.get("turnover_cost", TW_STOCK_ROUND_TRIP_COST))
+    estimated_turnover = _estimate_rebalance_turnover(current_positions, positions)
+    estimated_cost = estimated_turnover * turnover_cost
+
+    cash_weight = round(max(0.0, 1.0 - total_weight), 4)
+    notes = [
+        f"market_state={market_view['signal']}",
+        f"gross_exposure_target={exposure:.0%}",
+        f"hold_buffer={hold_buffer}",
+        f"weight_mode={weight_mode}",
+        f"estimated_turnover={estimated_turnover:.1%}",
+        f"estimated_cost={estimated_cost:.3%}",
+    ]
+    if not positions:
+        notes.append("no_eligible_positions")
+
+    return {
+        "positions": positions,
+        "entries": entries,
+        "holds": holds,
+        "exits": exits,
+        "gross_exposure": round(total_weight, 4),
+        "cash_weight": cash_weight,
+        "notes": notes,
+    }
+
+
+def _calculate_position_weights(
+    selected: list[dict],
+    exposure: float,
+    max_position_weight: float,
+    weight_mode: str,
+) -> dict[str, float]:
+    """根據 weight_mode 計算每檔個股的目標權重。"""
+    if not selected:
+        return {}
+
+    if weight_mode == "score_weighted":
+        scores = {s["symbol"]: max(s.get("portfolio_score", 0), 1.0) for s in selected}
+        score_sum = sum(scores.values())
+        weights = {sym: (score / score_sum) * exposure for sym, score in scores.items()}
+
+        # P0-6 fix: 迭代式 redistribution — 確保所有 excess 都被重新分配
+        max_iterations = 10
+        for _ in range(max_iterations):
+            excess = 0.0
+            capped_symbols: set[str] = set()
+            for sym, w in weights.items():
+                if w > max_position_weight:
+                    excess += w - max_position_weight
+                    weights[sym] = max_position_weight
+                    capped_symbols.add(sym)
+            if excess < 1e-6:
+                break
+            uncapped = [sym for sym in weights if sym not in capped_symbols and weights[sym] < max_position_weight]
+            if not uncapped:
+                break
+            per_share = excess / len(uncapped)
+            for sym in uncapped:
+                weights[sym] += per_share
+
+        return {sym: round(w, 4) for sym, w in weights.items()}
+
+    # equal weight (default fallback)
+    equal_weight = min(max_position_weight, exposure / len(selected))
+    return {s["symbol"]: round(equal_weight, 4) for s in selected}
+
+
+def _estimate_rebalance_turnover(
+    current_positions: dict[str, dict],
+    target_positions: list[dict],
+) -> float:
+    """Estimate one-way portfolio turnover across the rebalance.
+
+    Uses 0.5 * sum(abs(target_weight - current_weight)) so that a full
+    portfolio replacement equals 100% one-way turnover instead of 200%
+    gross traded notional.
+    """
+    current_weights = {
+        symbol: float(position.get("target_weight", 0.0) or 0.0)
+        for symbol, position in current_positions.items()
+    }
+    target_weights = {
+        position["symbol"]: float(position.get("target_weight", 0.0) or 0.0)
+        for position in target_positions
+    }
+
+    all_symbols = set(current_weights) | set(target_weights)
+    traded_notional = 0.0
+    for symbol in all_symbols:
+        traded_notional += abs(target_weights.get(symbol, 0.0) - current_weights.get(symbol, 0.0))
+    return round(traded_notional / 2.0, 4)
+
+
+def _metric_ranks(items: list[dict], key: str) -> tuple[dict[str, float], bool]:
+    values = {
+        item["symbol"]: item.get(key)
+        for item in items
+        if item.get(key) is not None and isfinite(item.get(key))
+    }
+    if not values:
+        return ({item["symbol"]: 0.5 for item in items}, False)
+
+    series = pd.Series(values, dtype="float64")
+    ranks = series.rank(pct=True, ascending=True, method="average")
+    output = {item["symbol"]: 0.5 for item in items}
+    for symbol, value in ranks.items():
+        output[symbol] = float(value)
+    return output, True
+
+
+def _period_return(series: pd.Series, periods: int) -> float | None:
+    if len(series) <= periods:
+        return None
+    start = float(series.iloc[-periods - 1])
+    end = float(series.iloc[-1])
+    if start == 0:
+        return None
+    return (end / start) - 1.0
+
+
+def _skip_period_return(series: pd.Series, total_periods: int, skip_recent: int) -> float | None:
+    if len(series) <= total_periods + skip_recent:
+        return None
+    start = float(series.iloc[-(total_periods + skip_recent + 1)])
+    end = float(series.iloc[-(skip_recent + 1)])
+    if start == 0:
+        return None
+    return (end / start) - 1.0
+
+
+def _trend_quality(
+    close: float,
+    sma_fast: float | None,
+    sma_slow: float | None,
+    structure: int,
+    regime: str,
+) -> float:
+    score = 0.0
+    if sma_slow is not None and close > sma_slow:
+        score += 0.35
+    if sma_fast is not None and close > sma_fast:
+        score += 0.15
+    if sma_fast is not None and sma_slow is not None and sma_fast > sma_slow:
+        score += 0.25
+    if structure == 1:
+        score += 0.15
+    if regime == "trending_up":
+        score += 0.10
+    elif regime == "ranging":
+        score += 0.05
+    return round(min(score, 1.0), 4)
+
+
+def _monthly_revenue_momentum(
+    df: pd.DataFrame | None,
+    as_of: datetime,
+) -> tuple[float | None, float | None, float | None]:
+    if df is None or df.empty:
+        return None, None, None
+
+    working = df.copy()
+    if "date" not in working.columns:
+        return None, None, None
+
+    working["date"] = pd.to_datetime(working["date"])
+    working = working.sort_values("date")
+
+    # 過濾尚未公開的營收資料（避免 look-ahead bias）
+    # 台股月營收法定公告期限為次月 10 日前
+    # FinMind date 欄位為營收月份（如 2026-01-01 表示一月營收）
+    # P0-8: 使用 35 天延遲（次月底 + 5 天緩衝），原 40 天偏保守會浪費可用資料
+    as_of_ts = pd.Timestamp(as_of).tz_localize(None) if pd.Timestamp(as_of).tzinfo else pd.Timestamp(as_of)
+    cutoff = as_of_ts - pd.Timedelta(days=35)
+    working = working[working["date"] <= cutoff]
+    if working.empty:
+        return None, None, None
+
+    revenue_col = next(
+        (col for col in ["revenue", "Revenue", "monthly_revenue"] if col in working.columns),
+        None,
+    )
+    if revenue_col is None:
+        return None, None, None
+
+    working["_revenue"] = pd.to_numeric(working[revenue_col], errors="coerce")
+    working = working.dropna(subset=["_revenue"])
+    if working.empty:
+        return None, None, None
+
+    # 用日期比對找去年同月，而非 index 偏移
+    latest_row = working.iloc[-1]
+    latest_date = latest_row["date"]
+    latest_revenue = float(latest_row["_revenue"])
+
+    yoy = None
+    target_year_ago = latest_date - pd.DateOffset(months=12)
+    # 找最接近 12 個月前的那筆（容許 ±45 天）
+    working["_date_diff"] = (working["date"] - target_year_ago).abs()
+    candidates = working[working["_date_diff"] <= pd.Timedelta(days=45)]
+    if not candidates.empty:
+        yoy_row = candidates.loc[candidates["_date_diff"].idxmin()]
+        yoy_revenue = float(yoy_row["_revenue"])
+        if yoy_revenue != 0:
+            yoy = (latest_revenue / yoy_revenue) - 1.0
+
+    # 加速度：近 3 個月平均 vs 前 3 個月平均
+    accel = None
+    if len(working) >= 6:
+        recent_3m = working["_revenue"].iloc[-3:].mean()
+        prev_3m = working["_revenue"].iloc[-6:-3].mean()
+        if prev_3m != 0:
+            accel = (float(recent_3m) / float(prev_3m)) - 1.0
+
+    raw = _weighted_average(
+        [
+            (yoy, 0.70),
+            (accel, 0.30),
+        ]
+    )
+    return yoy, accel, raw
+
+
+def _weighted_average(values: list[tuple[float | None, float]]) -> float | None:
+    valid = [(value, weight) for value, weight in values if value is not None]
+    if not valid:
+        return None
+    weight_sum = sum(weight for _, weight in valid)
+    if weight_sum == 0:
+        return None
+    return sum(value * weight for value, weight in valid) / weight_sum
+
+
+def _float_or_none(value) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
