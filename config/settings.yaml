@@ -37,6 +37,7 @@ portfolio:
   hold_buffer: 3
   hold_score_floor: 60
   max_position_weight: 0.12
+  min_holdings: 3
   market_proxy_symbol: "0050"
   history_limit: 320
   monthly_revenue_months: 15

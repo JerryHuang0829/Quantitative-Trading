@@ -7,7 +7,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - PYTHONPATH=/app
     volumes:
+      - ./src:/app/src
+      - ./main.py:/app/main.py
+      - ./scripts:/app/scripts
       - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs
@@ -34,7 +39,11 @@ services:
     profiles: ["tools"]
     env_file:
       - .env
+    environment:
+      - PYTHONPATH=/app
     volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
       - ./config:/app/config
       - ./data:/app/data
       - ./logs:/app/logs

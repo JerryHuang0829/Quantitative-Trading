@@ -256,10 +256,15 @@ def run_tw_stock_portfolio_rebalance(
         return None
 
     default_strategy = config.get("default_strategy", {})
+
+    # 先算 market_view，讓 eligibility filter 可依市場狀態調整門檻
+    market_view = _analyze_market_proxy(source, default_strategy, portfolio_config)
+    market_signal = market_view["signal"]
+
     analyses: list[dict] = []
     for sym_config in universe:
         try:
-            analyses.append(_analyze_symbol(sym_config, source, default_strategy, portfolio_config, as_of))
+            analyses.append(_analyze_symbol(sym_config, source, default_strategy, portfolio_config, as_of, market_signal=market_signal))
         except Exception as exc:
             logger.warning("Failed to analyze %s: %s", sym_config["symbol"], exc)
             analyses.append(
@@ -284,7 +289,6 @@ def run_tw_stock_portfolio_rebalance(
         )
         return None
 
-    market_view = _analyze_market_proxy(source, default_strategy, portfolio_config)
     ranked = _rank_analyses(analyses, portfolio_config)
     current_positions = {
         row["symbol"]: row
@@ -594,6 +598,8 @@ def _analyze_symbol(
     default_strategy: dict,
     portfolio_config: dict,
     as_of: datetime,
+    *,
+    market_signal: str = "caution",
 ) -> dict:
     """Analyze one stock and return raw factors used by the portfolio ranker."""
     symbol = sym_config["symbol"]
@@ -643,7 +649,7 @@ def _analyze_symbol(
     if strategy.get("use_institutional", True) and hasattr(source, "fetch_institutional"):
         institutional_df = source.fetch_institutional(symbol)
         institutional_result = score_institutional(institutional_df)
-    institutional_raw = float(institutional_result.get("score", 0)) / 100.0
+    institutional_raw = float(institutional_result.get("score", 0))
 
     revenue_yoy = None
     revenue_accel = None
@@ -662,12 +668,25 @@ def _analyze_symbol(
         filters.append("price_below_floor")
     if avg_turnover_20 < float(portfolio_config.get("min_avg_turnover", 50_000_000.0)):
         filters.append("turnover_too_low")
-    if sma_slow is None or close <= sma_slow:
-        filters.append("below_sma_slow")
-    if sma_fast is None or sma_slow is None or sma_fast <= sma_slow:
-        filters.append("trend_not_aligned")
-    if momentum_6m is None or momentum_6m <= 0:
-        filters.append("momentum_6m_non_positive")
+
+    # 趨勢 / 動能門檻依市場狀態分級：
+    # risk_on / caution：嚴格（原邏輯）
+    # risk_off：放寬，避免空頭市場 eligible 歸零
+    if market_signal == "risk_off":
+        # 空頭放寬：只要求 close > SMA60 × 0.85（容許跌破 15%）
+        if sma_slow is not None and close <= sma_slow * 0.85:
+            filters.append("below_sma_slow_relaxed")
+        # 不檢查 SMA20 > SMA60（空頭幾乎不可能）
+        # momentum_6m 容許至 -15%
+        if momentum_6m is None or momentum_6m <= -0.15:
+            filters.append("momentum_6m_deep_negative")
+    else:
+        if sma_slow is None or close <= sma_slow:
+            filters.append("below_sma_slow")
+        if sma_fast is None or sma_slow is None or sma_fast <= sma_slow:
+            filters.append("trend_not_aligned")
+        if momentum_6m is None or momentum_6m <= 0:
+            filters.append("momentum_6m_non_positive")
 
     return {
         "symbol": symbol,
@@ -770,8 +789,31 @@ def _select_positions(
     hold_score_floor = float(portfolio_config.get("hold_score_floor", 55.0))
     max_same_industry = int(portfolio_config.get("max_same_industry", 2))
     turnover_score_threshold = float(portfolio_config.get("turnover_score_threshold", 5.0))
+    to_remove: set[str] = set()  # 追蹤被產業限制移除的股票
 
     eligible = [item for item in ranked if item.get("eligible")]
+    min_holdings = int(portfolio_config.get("min_holdings", 3))
+    if len(eligible) < min_holdings:
+        logger.warning(
+            "Only %d eligible stocks (min_holdings=%d) — going full cash to avoid concentration risk",
+            len(eligible), min_holdings,
+        )
+        return {
+            "positions": [],
+            "entries": [],
+            "holds": [],
+            "exits": [
+                {
+                    "symbol": sym,
+                    "name": prev.get("name", sym),
+                    "previous_weight": float(prev.get("target_weight", 0) or 0),
+                }
+                for sym, prev in current_positions.items()
+            ],
+            "gross_exposure": 0.0,
+            "cash_weight": 1.0,
+            "notes": [f"min_holdings_not_met:{len(eligible)}<{min_holdings}"],
+        }
     rank_by_symbol = {item["symbol"]: item["rank"] for item in ranked}
     score_by_symbol = {item["symbol"]: item.get("portfolio_score", 0) for item in ranked}
     industry_by_symbol = {item["symbol"]: item.get("industry", "") for item in ranked}
@@ -797,9 +839,8 @@ def _select_positions(
     if max_same_industry > 0:
         industry_groups: dict[str, list[dict]] = {}
         for item in selected:
-            ind = item.get("industry", "")
-            if ind:
-                industry_groups.setdefault(ind, []).append(item)
+            ind = item.get("industry", "") or "_unknown"
+            industry_groups.setdefault(ind, []).append(item)
 
         to_remove: set[str] = set()
         for industry, members in industry_groups.items():
@@ -829,11 +870,11 @@ def _select_positions(
             continue
 
         # 產業分散檢查
-        candidate_industry = candidate.get("industry", "")
-        if candidate_industry and max_same_industry > 0:
+        candidate_industry = candidate.get("industry", "") or "_unknown"
+        if max_same_industry > 0:
             same_industry_count = sum(
                 1 for s in selected
-                if s.get("industry", "") == candidate_industry and candidate_industry != ""
+                if (s.get("industry", "") or "_unknown") == candidate_industry
             )
             if same_industry_count >= max_same_industry:
                 continue
@@ -930,8 +971,9 @@ def _select_positions(
 
     # 估算換倉成本，納入 ENTER / EXIT / ADD / REDUCE 的實際權重變化
     turnover_cost = float(portfolio_config.get("turnover_cost", TW_STOCK_ROUND_TRIP_COST))
+    slippage_bps = float(portfolio_config.get("slippage_bps", 5))
     estimated_turnover = _estimate_rebalance_turnover(current_positions, positions)
-    estimated_cost = estimated_turnover * turnover_cost
+    estimated_cost = estimated_turnover * turnover_cost + estimated_turnover * 2 * (slippage_bps / 10000.0)
 
     cash_weight = round(max(0.0, 1.0 - total_weight), 4)
     notes = [
@@ -953,6 +995,7 @@ def _select_positions(
         "gross_exposure": round(total_weight, 4),
         "cash_weight": cash_weight,
         "notes": notes,
+        "rejected_by_industry": sorted(to_remove) if to_remove else [],
     }
 
 
@@ -1067,20 +1110,41 @@ def _trend_quality(
     structure: int,
     regime: str,
 ) -> float:
+    """Continuous trend quality score (0–1).
+
+    Each component uses linear interpolation instead of binary 0/1,
+    so percentile ranking across stocks has real discriminating power.
+    """
     score = 0.0
-    if sma_slow is not None and close > sma_slow:
-        score += 0.35
-    if sma_fast is not None and close > sma_fast:
-        score += 0.15
-    if sma_fast is not None and sma_slow is not None and sma_fast > sma_slow:
-        score += 0.25
+
+    # 35%: Price vs SMA_slow — linear 0→1 over [-5%, +20%]
+    if sma_slow is not None and sma_slow > 0:
+        pct = close / sma_slow - 1.0
+        score += 0.35 * _clamp01((pct + 0.05) / 0.25)
+
+    # 15%: Price vs SMA_fast — linear 0→1 over [-3%, +10%]
+    if sma_fast is not None and sma_fast > 0:
+        pct = close / sma_fast - 1.0
+        score += 0.15 * _clamp01((pct + 0.03) / 0.13)
+
+    # 25%: MA alignment (spread) — linear 0→1 over [-2%, +10%]
+    if sma_fast is not None and sma_slow is not None and sma_slow > 0:
+        spread = sma_fast / sma_slow - 1.0
+        score += 0.25 * _clamp01((spread + 0.02) / 0.12)
+
+    # 15%: Structure (higher highs / higher lows — binary)
     if structure == 1:
         score += 0.15
-    if regime == "trending_up":
-        score += 0.10
-    elif regime == "ranging":
-        score += 0.05
+
+    # 10%: Regime (categorical → ordinal)
+    _regime_score = {"trending_up": 1.0, "ranging": 0.5, "trending_down": 0.0}
+    score += 0.10 * _regime_score.get(regime, 0.25)
+
     return round(min(score, 1.0), 4)
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, x))
 
 
 def _monthly_revenue_momentum(

@@ -118,6 +118,11 @@ def compute_metrics(
             beta = cov_matrix.loc["portfolio", "benchmark"] / bench_var if bench_var > 0 else 1.0
             result["beta"] = round(beta, 4)
 
+            # Benchmark 類型標記：目前使用未還原除息價格
+            # FinMind TaiwanStockPriceAdj 在目前帳號不可用，所有股票（含 0050）均為 price-only
+            # 組合與 benchmark 同口徑比較，alpha 大致公平，但雙方都低估約 2-3% 年化殖利率
+            result["benchmark_type"] = "price_only"
+
     return result
 
 

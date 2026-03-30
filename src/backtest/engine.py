@@ -234,11 +234,6 @@ class BacktestEngine:
         logger.info("Backtest: %s to %s", start_date.date(), end_date.date())
 
         rebalance_day = int(self._portfolio_config.get("rebalance_day", 12))
-        rebalance_dates = self._generate_rebalance_dates(start_date, end_date, rebalance_day)
-
-        if not rebalance_dates:
-            logger.error("No rebalance dates in range")
-            return {"metrics": {}, "report": "No rebalance dates", "monthly_snapshots": []}
 
         # 固定「現在」時間點：整輪回測使用同一個 reference_now，
         # 避免在跨午夜或長時間回測中 datetime.now() 的多次呼叫造成窗口不一致。
@@ -251,6 +246,17 @@ class BacktestEngine:
             backtest_start=start_date,
             reference_now=reference_now,
         )
+
+        # 取 benchmark 交易日索引，用於對齊 rebalance 日期到真實交易日
+        _bench_for_dates = self._source.fetch_ohlcv(benchmark_symbol, "D", 3000)
+        _trading_days = _bench_for_dates.index if _bench_for_dates is not None and not _bench_for_dates.empty else None
+        rebalance_dates = self._generate_rebalance_dates(
+            start_date, end_date, rebalance_day, trading_days=_trading_days
+        )
+
+        if not rebalance_dates:
+            logger.error("No rebalance dates in range")
+            return {"metrics": {}, "report": "No rebalance dates", "monthly_snapshots": []}
 
         # 預載入市值等參考資料（覆蓋從回測起點到 reference_now 的完整期間）
         backtest_days = (reference_now - start_date).days + 60
@@ -294,12 +300,17 @@ class BacktestEngine:
                 logger.warning("Empty universe at %s; keeping positions", rebal_date.date())
                 continue
 
+            # 先算 market_view，讓 eligibility filter 依市場狀態調整
+            market_view = _analyze_market_proxy(slicer, default_strategy, self._portfolio_config)
+            market_signal = market_view["signal"]
+
             analyses = []
             for sym_config in universe:
                 try:
                     analyses.append(
                         _analyze_symbol(sym_config, slicer, default_strategy,
-                                        self._portfolio_config, rebal_date)
+                                        self._portfolio_config, rebal_date,
+                                        market_signal=market_signal)
                     )
                 except Exception as exc:
                     analyses.append({
@@ -310,7 +321,11 @@ class BacktestEngine:
                         "industry": sym_config.get("industry", ""),
                     })
 
-            market_view = _analyze_market_proxy(slicer, default_strategy, self._portfolio_config)
+            # 資料品質統計
+            n_analyzed = len(analyses)
+            n_errors = sum(1 for a in analyses if any("analysis_error" in str(f) for f in a.get("filters", [])))
+            n_eligible = sum(1 for a in analyses if a.get("eligible", False))
+
             ranked = _rank_analyses(analyses, self._portfolio_config)
 
             # 將目前持倉轉成 _select_positions 需要的格式
@@ -342,14 +357,91 @@ class BacktestEngine:
 
             current_holdings = new_holdings
 
+            # 識別選股過程中被拒絕的原因
+            selected_symbols_set = {p["symbol"] for p in selection["positions"]}
+            top_n = int(self._portfolio_config.get("top_n", 8))
+            eligible_list = [a["symbol"] for a in ranked if a.get("eligible", False)]
+            rejected_by_selection = [
+                s for s in eligible_list if s not in selected_symbols_set
+            ]
+            rejected_by_top_n = [
+                s for i, s in enumerate(eligible_list)
+                if s not in selected_symbols_set and i >= top_n
+            ]
+
+            # 分析階段的拒絕原因細分（從每支股票的 filters 欄位提取）
+            rejected_by_turnover = [
+                a["symbol"] for a in analyses
+                if "turnover_too_low" in a.get("filters", [])
+            ]
+            rejected_by_price = [
+                a["symbol"] for a in analyses
+                if "price_below_floor" in a.get("filters", [])
+            ]
+            rejected_by_history = [
+                a["symbol"] for a in analyses
+                if "insufficient_history" in a.get("filters", [])
+            ]
+            rejected_by_trend = [
+                a["symbol"] for a in analyses
+                if any(f in a.get("filters", []) for f in (
+                    "below_sma_slow", "below_sma_slow_relaxed",
+                    "trend_not_aligned", "momentum_6m_non_positive",
+                    "momentum_6m_deep_negative",
+                ))
+            ]
+            # 產業限制拒絕（由 _select_positions 回傳）
+            rejected_by_industry = selection.get("rejected_by_industry", [])
+
+            # factor_coverage：eligible 股票中有有效因子資料的比例
+            eligible_analyses = [a for a in analyses if a.get("eligible", False)]
+            if eligible_analyses:
+                factor_coverage = {
+                    "revenue_momentum": round(
+                        sum(1 for a in eligible_analyses if a.get("revenue_raw") is not None)
+                        / len(eligible_analyses), 3
+                    ),
+                    "institutional_flow": round(
+                        sum(1 for a in eligible_analyses if (a.get("institutional_raw") or 0) != 0)
+                        / len(eligible_analyses), 3
+                    ),
+                }
+            else:
+                factor_coverage = {"revenue_momentum": 0.0, "institutional_flow": 0.0}
+
+            # data_degraded 判定：錯誤率 > 20% 或 因子覆蓋率 < 30%
+            error_degraded = n_errors > n_analyzed * 0.2
+            coverage_degraded = (
+                factor_coverage.get("revenue_momentum", 0) < 0.3
+                or factor_coverage.get("institutional_flow", 0) < 0.3
+            ) if eligible_analyses else False
+            data_degraded = error_degraded or coverage_degraded
+
             # 保存 snapshot
             snapshot = {
                 "rebalance_date": rebal_date.isoformat(),
                 "market_signal": market_view["signal"],
                 "gross_exposure": selection["gross_exposure"],
+                "total_analyzed": n_analyzed,
+                "analysis_errors": n_errors,
+                "eligible_candidates": n_eligible,
                 "selected_count": len(selection["positions"]),
                 "one_way_turnover": round(turnover, 4),
                 "trade_cost": round(total_trade_cost, 6),
+                "data_degraded": data_degraded,
+                "data_degraded_reasons": (
+                    (["error_rate_high"] if error_degraded else [])
+                    + (["factor_coverage_low"] if coverage_degraded else [])
+                ),
+                "factor_coverage": factor_coverage,
+                "eligible_list": eligible_list,
+                "rejected_not_selected": rejected_by_selection,
+                "rejected_by_top_n": rejected_by_top_n,
+                "rejected_by_turnover": rejected_by_turnover,
+                "rejected_by_price": rejected_by_price,
+                "rejected_by_history": rejected_by_history,
+                "rejected_by_trend": rejected_by_trend,
+                "rejected_by_industry": rejected_by_industry,
                 "positions": [
                     {"symbol": p["symbol"], "weight": p["target_weight"], "score": p["score"]}
                     for p in selection["positions"]
@@ -389,6 +481,17 @@ class BacktestEngine:
             total_turnover / n_rebalances if n_rebalances else 0, 4
         )
         metrics["n_rebalances"] = n_rebalances
+
+        # 資料品質標記：任一再平衡週期 data_degraded=True 則整輪標記
+        degraded_periods = [s for s in monthly_snapshots if s.get("data_degraded")]
+        metrics["data_degraded"] = len(degraded_periods) > 0
+        metrics["degraded_periods"] = len(degraded_periods)
+        if degraded_periods:
+            logger.warning(
+                "⚠️ 本輪回測有 %d/%d 個再平衡週期資料降級（分析錯誤率 >20%%），"
+                "KPI 不應視為乾淨研究基準。",
+                len(degraded_periods), n_rebalances,
+            )
 
         logger.info("\n%s", report)
 
@@ -430,6 +533,17 @@ class BacktestEngine:
                 continue
 
             daily_ret = period_df["close"].pct_change().dropna()
+            # 過濾 inf：收盤價含 0 或資料錯誤時 pct_change 可能產生 inf，
+            # dropna() 不會移除 inf，必須明確替換，否則一個壞點汙染整個 KPI。
+            n_inf = daily_ret.isin([float("inf"), float("-inf")]).sum()
+            if n_inf > 0:
+                logger.warning(
+                    "Symbol %s: %d infinite daily return(s) in [%s, %s] — likely bad price data; dropping",
+                    symbol, n_inf, period_start.date(), period_end.date(),
+                )
+                daily_ret = daily_ret[~daily_ret.isin([float("inf"), float("-inf")])]
+            if daily_ret.empty:
+                continue
             stock_daily_returns[symbol] = daily_ret
 
         if not stock_daily_returns:
@@ -465,9 +579,14 @@ class BacktestEngine:
 
     @staticmethod
     def _generate_rebalance_dates(
-        start: datetime, end: datetime, day: int
+        start: datetime, end: datetime, day: int,
+        trading_days: pd.DatetimeIndex | None = None,
     ) -> list[datetime]:
-        """產生回測期間內所有再平衡日期。"""
+        """產生回測期間內所有再平衡日期。
+
+        若提供 trading_days，會將每個日曆日對齊到**同日或之後**最近的交易日，
+        避免在假日/週末做 as_of 截斷造成 look-ahead bias。
+        """
         dates = []
         current = start.replace(day=min(day, 28))
         if current < start:
@@ -482,5 +601,20 @@ class BacktestEngine:
                 current = current.replace(year=current.year + 1, month=1)
             else:
                 current = current.replace(month=current.month + 1)
+
+        if trading_days is not None and len(trading_days) > 0:
+            td_naive = trading_days.tz_localize(None) if trading_days.tz else trading_days
+            aligned = []
+            for d in dates:
+                # 找 >= d 的最近交易日
+                future = td_naive[td_naive >= pd.Timestamp(d)]
+                if len(future) > 0:
+                    aligned.append(future[0].to_pydatetime())
+                else:
+                    # 沒有未來交易日（回測尾端），取 <= d 的最近交易日
+                    past = td_naive[td_naive <= pd.Timestamp(d)]
+                    if len(past) > 0:
+                        aligned.append(past[-1].to_pydatetime())
+            dates = aligned
 
         return dates

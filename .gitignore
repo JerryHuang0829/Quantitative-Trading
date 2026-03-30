@@ -11,10 +11,13 @@ __pycache__/
 .venv/
 venv/
 
-# Data & Reports (generated artifacts)
+# Data
 data/*.db
 data/signals.db
-reports/
+data/cache/
+
+# Reports — 保留在 git 供跨機器比對（非唯一真相，換機器後應重跑並比對差異）
+# reports/
 
 # IDE
 .vscode/

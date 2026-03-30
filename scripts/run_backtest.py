@@ -79,6 +79,36 @@ def _preflight_check(source, benchmark_symbol: str = "0050") -> bool:
     except Exception as exc:
         print(f"  [WARN] Institutional (2330): {exc} — factor scores will be zero")
 
+    # 4. Month Revenue — 警告（revenue_momentum 降級為 0）
+    try:
+        df = source.fetch_month_revenue("2330", months=6)
+        if df is not None and not df.empty:
+            print(f"  [OK] MonthRevenue (2330): {len(df)} rows")
+        else:
+            print("  [WARN] MonthRevenue (2330): empty — revenue factor will be zero")
+    except Exception as exc:
+        print(f"  [WARN] MonthRevenue (2330): {exc} — revenue factor will be zero")
+
+    # 5. Market Value — 警告（universe 排序降級為 size proxy）
+    try:
+        df = source.fetch_market_value(days=5)
+        if df is not None and not df.empty:
+            print(f"  [OK] MarketValue: {len(df)} rows")
+        else:
+            print("  [WARN] MarketValue: empty — universe will use size proxy fallback")
+    except Exception as exc:
+        print(f"  [WARN] MarketValue: {exc} — universe will use size proxy fallback")
+
+    # 6. Delisting — 警告（survivorship bias 風險）
+    try:
+        df = source.fetch_delisting() if hasattr(source, "fetch_delisting") else None
+        if df is not None and not df.empty:
+            print(f"  [OK] Delisting: {len(df)} rows")
+        else:
+            print("  [WARN] Delisting: empty — survivorship bias possible")
+    except Exception as exc:
+        print(f"  [WARN] Delisting: {exc} — survivorship bias possible")
+
     print("=" * 50)
     if not ok:
         print("  PREFLIGHT FAILED — FinMind API unavailable.")
@@ -93,17 +123,36 @@ def _preflight_check(source, benchmark_symbol: str = "0050") -> bool:
     return ok
 
 
+def _resolve_token_and_source(benchmark: str) -> FinMindSource:
+    """嘗試多個 FinMind token，回傳第一個通過 preflight 的 source。"""
+    token_keys = ["FINMIND_TOKEN", "FINMIND_TOKEN2", "FINMIND_TOKEN3"]
+    tokens = [(k, os.getenv(k)) for k in token_keys if os.getenv(k)]
+
+    if not tokens:
+        print("WARNING: 未設定任何 FINMIND_TOKEN，使用匿名模式（配額極低）")
+        source = FinMindSource(token=None)
+        if _preflight_check(source, benchmark_symbol=benchmark):
+            return source
+        raise SystemExit(1)
+
+    for env_key, token in tokens:
+        print(f"\n嘗試 {env_key} ...")
+        source = FinMindSource(token=token)
+        if _preflight_check(source, benchmark_symbol=benchmark):
+            print(f"使用 {env_key} 進行回測\n")
+            return source
+        print(f"{env_key} preflight 失敗，嘗試下一個 token...\n")
+
+    print("所有 token 均 preflight 失敗，請等待下一個配額窗口。")
+    raise SystemExit(1)
+
+
 def main() -> None:
     args = _parse_args()
     load_dotenv()
 
     config = load_config(args.config)
-    token = os.getenv("FINMIND_TOKEN")
-    source = FinMindSource(token=token)
-
-    if not _preflight_check(source, benchmark_symbol=args.benchmark):
-        print("Aborting backtest due to preflight failure.")
-        raise SystemExit(1)
+    source = _resolve_token_and_source(args.benchmark)
 
     engine = BacktestEngine(source, config, slippage_bps=args.slippage_bps)
 

@@ -1,8 +1,17 @@
-"""FinMind data source wrapper for Taiwan stocks."""
+"""FinMind data source wrapper for Taiwan stocks with persistent disk caching.
+
+Historical market data is immutable — yesterday's close never changes.
+A disk-based cache (pickle files under ``data/cache/``) stores all fetched
+DataFrames so that repeated backtests incur zero API calls after the first
+successful run.  Only truly new data (the gap between the cached max-date
+and today) is fetched from the API.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
+import pathlib
 import time as _time
 from datetime import datetime, timedelta
 
@@ -18,36 +27,125 @@ MARKET_OPEN_MIN = 0
 MARKET_CLOSE_HOUR = 13
 MARKET_CLOSE_MIN = 30
 
+# First fetch covers ~11 years — the slicer requests limit=2000 (×1.8 = 3600 days).
+_WIDE_LOOKBACK_DAYS = 4000
+
+
+# ---------------------------------------------------------------------------
+# Persistent disk cache
+# ---------------------------------------------------------------------------
+
+class _DiskCache:
+    """Append-only persistent cache using pickle files.
+
+    Layout::
+
+        cache_dir/
+          ohlcv/2330.pkl          # per-symbol time-series
+          institutional/2330.pkl
+          revenue/2330.pkl
+          stock_info/_global.pkl  # snapshot datasets
+          stock_info/_global.meta # date string for TTL expiry
+    """
+
+    def __init__(self, cache_dir: str | pathlib.Path):
+        self._dir = pathlib.Path(cache_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._mem: dict[str, pd.DataFrame] = {}
+
+    def _path(self, dataset: str, symbol: str = "_global") -> pathlib.Path:
+        subdir = self._dir / dataset
+        subdir.mkdir(exist_ok=True)
+        safe = symbol.replace("/", "_").replace("\\", "_")
+        return subdir / f"{safe}.pkl"
+
+    def load(self, dataset: str, symbol: str = "_global") -> pd.DataFrame | None:
+        key = f"{dataset}:{symbol}"
+        if key in self._mem:
+            return self._mem[key]
+        path = self._path(dataset, symbol)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_pickle(path)
+            self._mem[key] = df
+            return df
+        except Exception:
+            path.unlink(missing_ok=True)
+            return None
+
+    def save(self, dataset: str, df: pd.DataFrame, symbol: str = "_global") -> None:
+        key = f"{dataset}:{symbol}"
+        self._mem[key] = df
+        try:
+            df.to_pickle(self._path(dataset, symbol))
+        except Exception as exc:
+            logger.warning("Disk cache write failed: %s", exc)
+
+    # Lightweight metadata sidecar for TTL-based datasets.
+    def meta(self, dataset: str, symbol: str = "_global") -> str | None:
+        p = self._path(dataset, symbol).with_suffix(".meta")
+        return p.read_text().strip() if p.exists() else None
+
+    def save_meta(self, dataset: str, date_str: str, symbol: str = "_global") -> None:
+        try:
+            self._path(dataset, symbol).with_suffix(".meta").write_text(date_str)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# In-memory cache for ephemeral non-DataFrame values
+# ---------------------------------------------------------------------------
 
 class _SimpleCache:
-    """當日有效的簡易記憶體 cache，避免重複 API 呼叫。"""
+    """Same-day in-memory cache (booleans, scalars)."""
 
     def __init__(self):
         self._store: dict[str, tuple[str, object]] = {}
 
     def get(self, key: str) -> object | None:
         today = datetime.now(TW_TZ).strftime("%Y-%m-%d")
-        entry = self._store.get(key)
-        if entry and entry[0] == today:
-            return entry[1]
-        return None
+        e = self._store.get(key)
+        return e[1] if e and e[0] == today else None
 
     def set(self, key: str, value: object) -> None:
-        today = datetime.now(TW_TZ).strftime("%Y-%m-%d")
-        self._store[key] = (today, value)
+        self._store[key] = (datetime.now(TW_TZ).strftime("%Y-%m-%d"), value)
 
+
+# ---------------------------------------------------------------------------
+# FinMind data source
+# ---------------------------------------------------------------------------
 
 class FinMindSource(DataSource):
-    """Fetch Taiwan stock datasets from FinMind with rate limiting and caching."""
+    """Fetch Taiwan stock datasets from FinMind with rate limiting and
+    persistent disk caching.
 
-    def __init__(self, token: str | None = None, request_interval: float = 0.5, use_adjusted: bool = True):
+    Parameters
+    ----------
+    cache_dir : str, optional
+        Override the cache directory.  Defaults to ``DATA_CACHE_DIR`` env var
+        or ``/app/data/cache`` (the Docker volume mount).
+    """
+
+    def __init__(
+        self,
+        token: str | None = None,
+        request_interval: float = 0.5,
+        use_adjusted: bool = True,
+        cache_dir: str | None = None,
+    ):
         from FinMind.data import DataLoader
 
         self.loader = DataLoader()
         self._request_interval = request_interval
         self._last_request_time: float = 0.0
-        self._cache = _SimpleCache()
+        self._simple_cache = _SimpleCache()
         self._use_adjusted = use_adjusted
+
+        if cache_dir is None:
+            cache_dir = os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
+        self._disk = _DiskCache(cache_dir)
 
         if token:
             self.loader.login_by_token(api_token=token)
@@ -55,118 +153,186 @@ class FinMindSource(DataSource):
         else:
             logger.info("FinMind token not provided; continuing with default client state")
 
+    # ---------------------------------------------------------------- helpers
+
     def _rate_limit(self) -> None:
-        """確保兩次 API 呼叫之間至少間隔 request_interval 秒。"""
+        """Ensure at least ``request_interval`` seconds between API calls."""
         elapsed = _time.monotonic() - self._last_request_time
         if elapsed < self._request_interval:
             _time.sleep(self._request_interval - elapsed)
         self._last_request_time = _time.monotonic()
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame | None:
-        if timeframe != "D":
-            logger.warning("FinMind only supports daily data here; requested timeframe=%s", timeframe)
+    @staticmethod
+    def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+        """Standardize FinMind daily DataFrame into OHLCV format."""
+        df = df.rename(columns={
+            "date": "timestamp", "max": "high", "min": "low",
+            "Trading_Volume": "volume",
+        })
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.set_index("timestamp").sort_index()
+        for col in ("open", "high", "low", "close", "volume"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
 
-        cache_key = f"ohlcv:{symbol}:{timeframe}:{limit}"
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
+    @staticmethod
+    def _ts_naive(ts: pd.Timestamp) -> pd.Timestamp:
+        return ts.tz_localize(None) if ts.tzinfo else ts
 
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=int(limit * 1.8))
-        start_str = start_date.strftime("%Y-%m-%d")
-        end_str = end_date.strftime("%Y-%m-%d")
+    # ----------------------------------------------------------------- OHLCV
 
+    def _api_fetch_ohlcv(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
+        """Raw API call — tries adjusted price then falls back to unadjusted."""
         df = None
-
-        # P0-2: 優先使用還原後股價（處理除權息、減資、分割）
         if self._use_adjusted:
-            df = self._fetch_adjusted_daily(symbol, start_str, end_str)
-
-        # Fallback: 若還原價不可用，使用一般日線並警告
+            df = self._fetch_adjusted_daily(symbol, start, end)
         if df is None or df.empty:
-            if self._use_adjusted:
-                logger.warning(
-                    "Adjusted price unavailable for %s; falling back to unadjusted daily",
-                    symbol,
-                )
             self._rate_limit()
             try:
                 df = self.loader.taiwan_stock_daily(
-                    stock_id=symbol,
-                    start_date=start_str,
-                    end_date=end_str,
+                    stock_id=symbol, start_date=start, end_date=end,
                 )
             except Exception as exc:
                 logger.error("Failed to fetch daily data for %s: %s", symbol, exc)
                 return None
-
         if df is None or df.empty:
             return None
+        return self._normalize_ohlcv(df)
 
-        df = self._normalize_ohlcv(df)
-        result = df[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
-        self._cache.set(cache_key, result)
-        return result
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame | None:
+        if timeframe != "D":
+            logger.warning("FinMind only supports daily data; requested timeframe=%s", timeframe)
+
+        now = datetime.now()
+        end_str = now.strftime("%Y-%m-%d")
+        want_start = now - timedelta(days=int(limit * 1.8))
+        # 容忍 3 天間隔（週五快取 → 週日不觸發向前延伸）
+        stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=3)
+
+        cached = self._disk.load("ohlcv", symbol)
+        changed = False
+
+        if cached is not None and not cached.empty:
+            c_min = self._ts_naive(cached.index.min())
+            c_max = self._ts_naive(cached.index.max())
+            req_start = pd.Timestamp(want_start.date())
+
+            # Extend backward only if cache is very sparse (< 252 rows ≈ 1 year of trading days).
+            # With _WIDE_LOOKBACK_DAYS=4000, any first fetch already covers 11 years.
+            # For existing symbols cached before this setting, 1000+ rows is sufficient
+            # for any 3Y+ backtest — the slicer truncates to the actual backtest window.
+            cached_in_range = cached[cached.index >= pd.Timestamp(want_start, tz="UTC")]
+            if len(cached) < 252 and c_min > req_start + pd.Timedelta(days=1):
+                old = self._api_fetch_ohlcv(
+                    symbol,
+                    want_start.strftime("%Y-%m-%d"),
+                    (c_min - pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                )
+                if old is not None and not old.empty:
+                    cached = pd.concat([old, cached]).sort_index()
+                    cached = cached[~cached.index.duplicated(keep="last")]
+                    changed = True
+
+            # Extend forward if cache is stale (3-day tolerance for weekends/holidays).
+            # Skip if data is > 1 year old — stock is likely delisted or API unavailable.
+            one_year_ago = pd.Timestamp(now.date()) - pd.Timedelta(days=365)
+            if c_max < stale_boundary and c_max >= one_year_ago:
+                new = self._api_fetch_ohlcv(
+                    symbol,
+                    (c_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                    end_str,
+                )
+                if new is not None and not new.empty:
+                    cached = pd.concat([cached, new]).sort_index()
+                    cached = cached[~cached.index.duplicated(keep="last")]
+                    changed = True
+        else:
+            # First fetch — use wide lookback to cover any backtest period
+            wide_start = now - timedelta(days=max(int(limit * 1.8), _WIDE_LOOKBACK_DAYS))
+            cached = self._api_fetch_ohlcv(symbol, wide_start.strftime("%Y-%m-%d"), end_str)
+            if cached is None or cached.empty:
+                return None
+            changed = True
+
+        if changed:
+            self._disk.save("ohlcv", cached, symbol)
+
+        # Slice to the requested range
+        start_ts = pd.Timestamp(want_start, tz="UTC")
+        result = cached[cached.index >= start_ts]
+        result = result[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
+        return result if not result.empty else None
 
     def _fetch_adjusted_daily(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-        """嘗試取得還原後股價（TaiwanStockPriceAdj）。"""
+        """Try to fetch adjusted prices (handles ex-dividend, capital reduction)."""
         self._rate_limit()
         try:
             df = self.loader.taiwan_stock_daily_adj(
-                stock_id=symbol,
-                start_date=start_date,
-                end_date=end_date,
+                stock_id=symbol, start_date=start_date, end_date=end_date,
             )
             if df is not None and not df.empty:
                 logger.debug("Using adjusted price for %s", symbol)
                 return df
         except (AttributeError, TypeError):
-            # FinMind 版本不支援此方法
             logger.info("FinMind does not support taiwan_stock_daily_adj; adjusted prices disabled")
             self._use_adjusted = False
         except Exception as exc:
             logger.warning("Failed to fetch adjusted daily for %s: %s", symbol, exc)
-            # 若為 KeyError('data') 代表此 dataset 需付費，停止後續嘗試
             if isinstance(exc, KeyError) and str(exc) == "'data'":
                 logger.info("TaiwanStockPriceAdj requires paid access; adjusted prices disabled")
                 self._use_adjusted = False
         return None
 
-    @staticmethod
-    def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-        """將 FinMind 日線 DataFrame 統一為標準 OHLCV 格式。"""
-        df = df.rename(
-            columns={
-                "date": "timestamp",
-                "max": "high",
-                "min": "low",
-                "Trading_Volume": "volume",
-            }
-        )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df = df.set_index("timestamp").sort_index()
-
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        return df
+    # ---------------------------------------------------------- Institutional
 
     def fetch_institutional(self, symbol: str, days: int = 30) -> pd.DataFrame | None:
-        cache_key = f"inst:{symbol}:{days}"
-        cached = self._cache.get(cache_key)
+        now = datetime.now()
+        end_str = now.strftime("%Y-%m-%d")
+        stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=3)
+
+        cached = self._disk.load("institutional", symbol)
+        changed = False
+
         if cached is not None:
-            return cached
+            # 空 DataFrame = 哨兵（此 symbol 無法人資料），不重複呼叫 API
+            if cached.empty:
+                return None
+            if "date" in cached.columns:
+                c_max = pd.Timestamp(cached["date"].max())
+                # 7-day tolerance (handles weekends + institutional report lag)
+                inst_stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=7)
+                one_year_ago = pd.Timestamp(now.date()) - pd.Timedelta(days=365)
+                if c_max < inst_stale_boundary and c_max >= one_year_ago:
+                    new_df = self._api_fetch_institutional(
+                        symbol,
+                        (c_max + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                        end_str,
+                    )
+                    if new_df is not None and not new_df.empty:
+                        cached = self._merge_institutional(cached, new_df)
+                        changed = True
+        else:
+            wide_start = now - timedelta(days=max(int(days * 1.5), _WIDE_LOOKBACK_DAYS))
+            cached = self._api_fetch_institutional(
+                symbol, wide_start.strftime("%Y-%m-%d"), end_str,
+            )
+            if cached is None or cached.empty:
+                # 存入空 DataFrame 作為哨兵，避免下次再呼叫 API
+                self._disk.save("institutional", pd.DataFrame(), symbol)
+                return None
+            changed = True
 
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=int(days * 1.5))
+        if changed:
+            self._disk.save("institutional", cached, symbol)
 
+        return cached.sort_values("date") if (cached is not None and "date" in cached.columns) else cached
+
+    def _api_fetch_institutional(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         self._rate_limit()
         try:
             df = self.loader.taiwan_stock_institutional_investors(
-                stock_id=symbol,
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d"),
+                stock_id=symbol, start_date=start, end_date=end,
             )
         except KeyError as exc:
             if str(exc) == "'data'":
@@ -187,33 +353,65 @@ class FinMindSource(DataSource):
 
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
-        for col in ["buy", "sell"]:
+        for col in ("buy", "sell"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        return df.sort_values("date")
 
-        # FinMind 每個交易日會有多個法人別列（如外資、投信、自營商），
-        # 這裡若用 .tail(days) 會按「列數」而不是「交易日數」截斷，
-        # 造成實際覆蓋期間大幅短於預期。直接保留 API 視窗內的完整資料，
-        # 由上游依 as_of/unique date 再做截斷。
-        result = df.sort_values("date")
-        self._cache.set(cache_key, result)
-        return result
+    @staticmethod
+    def _merge_institutional(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+        merged = pd.concat([old, new])
+        dedup_cols = ["date", "name"] if "name" in merged.columns else ["date"]
+        return merged.drop_duplicates(subset=dedup_cols, keep="last").sort_values("date")
+
+    # --------------------------------------------------------- Month Revenue
 
     def fetch_month_revenue(self, symbol: str, months: int = 15) -> pd.DataFrame | None:
-        cache_key = f"rev:{symbol}:{months}"
-        cached = self._cache.get(cache_key)
+        now = datetime.now()
+        end_str = now.strftime("%Y-%m-%d")
+
+        cached = self._disk.load("revenue", symbol)
+        changed = False
+
         if cached is not None:
-            return cached
+            # 空 DataFrame = 哨兵（此 symbol 無營收資料）
+            if cached.empty:
+                return None
+            if "date" in cached.columns:
+                c_max = pd.Timestamp(cached["date"].max())
+                # Revenue is monthly; stale if older than 45 days.
+                # Skip if > 1 year old — stock likely delisted or API unavailable.
+                stale_threshold = pd.Timestamp(now.date()) - pd.Timedelta(days=45)
+                one_year_ago = pd.Timestamp(now.date()) - pd.Timedelta(days=365)
+                if c_max < stale_threshold and c_max >= one_year_ago:
+                    fetch_start = (c_max - pd.Timedelta(days=35)).strftime("%Y-%m-%d")
+                    new_df = self._api_fetch_revenue(symbol, fetch_start, end_str)
+                    if new_df is not None and not new_df.empty:
+                        cached = pd.concat([cached, new_df]).drop_duplicates(
+                            subset=["date"], keep="last",
+                        ).sort_values("date")
+                        changed = True
+        else:
+            wide_start = now - timedelta(days=max(int(months * 35), _WIDE_LOOKBACK_DAYS))
+            cached = self._api_fetch_revenue(
+                symbol, wide_start.strftime("%Y-%m-%d"), end_str,
+            )
+            if cached is None or cached.empty:
+                # 存入空 DataFrame 作為哨兵
+                self._disk.save("revenue", pd.DataFrame(), symbol)
+                return None
+            changed = True
 
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=int(months * 35))
+        if changed:
+            self._disk.save("revenue", cached, symbol)
 
+        return cached
+
+    def _api_fetch_revenue(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         self._rate_limit()
         try:
             df = self.loader.taiwan_stock_month_revenue(
-                stock_id=symbol,
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d"),
+                stock_id=symbol, start_date=start, end_date=end,
             )
         except Exception as exc:
             logger.warning("Failed to fetch month revenue for %s: %s", symbol, exc)
@@ -227,45 +425,48 @@ class FinMindSource(DataSource):
             df = df.sort_values("date")
         if "revenue" in df.columns:
             df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
+        return df
 
-        # 月營收通常每月一列，但仍保留 API 視窗內完整資料，
-        # 由上游依 as_of/unique date 截斷，避免資料層與回測層重複裁切。
-        result = df
-        self._cache.set(cache_key, result)
-        return result
+    # ----------------------------------------------------------- Stock Info
 
     def fetch_stock_info(self) -> pd.DataFrame | None:
-        cached = self._cache.get("stock_info")
-        if cached is not None:
-            return cached
+        # Snapshot dataset — cache with 7-day TTL
+        cached = self._disk.load("stock_info")
+        meta = self._disk.meta("stock_info")
+        if cached is not None and meta:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+                return cached
 
         self._rate_limit()
         try:
             df = self.loader.taiwan_stock_info()
         except KeyError as exc:
             if str(exc) == "'data'":
-                logger.warning(
-                    "Stock info dataset unavailable with current FinMind access; "
-                    "historical auto-universe cannot be reconstructed"
-                )
-                return None
-            logger.warning("Failed to fetch stock info: %s", exc)
-            return None
+                logger.warning("Stock info dataset unavailable with current FinMind access")
+            else:
+                logger.warning("Failed to fetch stock info: %s", exc)
+            return cached
         except Exception as exc:
             logger.warning("Failed to fetch stock info: %s", exc)
-            return None
+            return cached
 
         if df is None or df.empty:
-            return None
+            return cached
 
         result = df.copy()
-        self._cache.set("stock_info", result)
+        self._disk.save("stock_info", result)
+        self._disk.save_meta("stock_info", datetime.now().strftime("%Y-%m-%d"))
         return result
 
+    # --------------------------------------------------------- Market Value
+
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
-        cached = self._cache.get("market_value")
-        if cached is not None:
-            return cached
+        # Snapshot dataset — cache with 1-day TTL
+        cached = self._disk.load("market_value")
+        meta = self._disk.meta("market_value")
+        if cached is not None and meta:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 1:
+                return cached
 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=max(days, 5))
@@ -278,19 +479,16 @@ class FinMindSource(DataSource):
             )
         except KeyError as exc:
             if str(exc) == "'data'":
-                logger.warning(
-                    "Market value dataset unavailable with current FinMind access; "
-                    "falling back to size proxy or manual ordering where supported"
-                )
-                return None
-            logger.warning("Failed to fetch market value data: %s", exc)
-            return None
+                logger.warning("Market value dataset unavailable with current FinMind access")
+            else:
+                logger.warning("Failed to fetch market value: %s", exc)
+            return cached
         except Exception as exc:
-            logger.warning("Failed to fetch market value data: %s", exc)
-            return None
+            logger.warning("Failed to fetch market value: %s", exc)
+            return cached
 
         if df is None or df.empty:
-            return None
+            return cached
 
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
@@ -298,26 +496,33 @@ class FinMindSource(DataSource):
             df["market_value"] = pd.to_numeric(df["market_value"], errors="coerce")
 
         result = df.sort_values(["stock_id", "date"]).dropna(subset=["stock_id"])
-        self._cache.set("market_value", result)
+        self._disk.save("market_value", result)
+        self._disk.save_meta("market_value", datetime.now().strftime("%Y-%m-%d"))
         return result
 
+    # -------------------------------------------------------------- Delisting
+
     def fetch_delisting(self) -> pd.DataFrame | None:
-        """取得台股下市/下櫃資料（TaiwanStockDelisting）。"""
-        cached = self._cache.get("delisting")
-        if cached is not None:
-            return cached
+        cached = self._disk.load("delisting")
+        meta = self._disk.meta("delisting")
+        if cached is not None and meta:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+                return cached
 
         self._rate_limit()
         try:
             df = self.loader.taiwan_stock_delisting()
             if df is not None and not df.empty:
-                self._cache.set("delisting", df)
+                self._disk.save("delisting", df)
+                self._disk.save_meta("delisting", datetime.now().strftime("%Y-%m-%d"))
                 return df
         except (AttributeError, TypeError):
             logger.info("FinMind does not support taiwan_stock_delisting")
         except Exception as exc:
             logger.warning("Failed to fetch delisting data: %s", exc)
-        return None
+        return cached
+
+    # --------------------------------------------------------- Market status
 
     def is_market_open(self) -> bool:
         now = datetime.now(TW_TZ)
@@ -330,18 +535,17 @@ class FinMindSource(DataSource):
         return market_open <= now <= market_close
 
     def is_trading_day(self) -> bool:
-        """透過實際市場資料判斷今天是否為交易日，無需維護假日曆。
+        """Check if today is a trading day by querying 0050 recent data.
 
-        查詢 0050 近期日線資料，若今天有交易紀錄則為交易日。
-        結果會快取一整天（僅快取 True；False 會在下個週期重試，
-        以免盤後資料尚未更新時誤判）。
+        Only caches True; False is retried each cycle in case data hasn't
+        been published yet.
         """
         now = datetime.now(TW_TZ)
         if now.weekday() >= 5:
             return False
 
         cache_key = "is_trading_day"
-        cached = self._cache.get(cache_key)
+        cached = self._simple_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -357,12 +561,10 @@ class FinMindSource(DataSource):
             if df is not None and not df.empty and "date" in df.columns:
                 trading_dates = set(str(d)[:10] for d in df["date"])
                 is_today_trading = today_str in trading_dates
-                # 只快取 True；False 可能是資料尚未更新，下次再試
                 if is_today_trading:
-                    self._cache.set(cache_key, True)
+                    self._simple_cache.set(cache_key, True)
                 return is_today_trading
         except Exception as exc:
             logger.warning("Failed to check trading day via market data: %s", exc)
 
-        # Fail closed: 若資料檢查失敗，先視為非交易日，等待下個週期重試
         return False

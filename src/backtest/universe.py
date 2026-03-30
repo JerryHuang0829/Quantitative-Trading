@@ -61,11 +61,28 @@ class HistoricalUniverse:
 
         working = self._stock_info.copy()
 
-        # 過濾 IPO date — 只保留在 as_of 之前已上市的股票
+        # 注意：TaiwanStockInfo.date 是 FinMind 的「記錄更新時間戳記」，
+        # 不是 IPO 日期。用 date <= as_of 過濾會把絕大多數合法上市股票排除
+        # （實測：2022-01-12 只剩 95 支，2024-12-12 才有 460 支）。
+        # 真正的 IPO 日期保護由 _analyze_symbol 的 274-bar OHLCV 要求提供：
+        # 一支在 as_of 之前沒有足夠日線歷史的股票，自然會被篩掉。
+        #
+        # 去重：同一 stock_id 因產業重分類或轉市（上市↔上櫃）會有多筆記錄，
+        # 取日期最新那筆（最新的產業/市場分類），避免同一股票被分析兩次。
         if "date" in working.columns:
             working["date"] = pd.to_datetime(working["date"], errors="coerce")
-            as_of_ts = pd.Timestamp(as_of).tz_localize(None)
-            working = working[working["date"] <= as_of_ts]
+            working = (
+                working
+                .sort_values(["stock_id", "date"])
+                .drop_duplicates("stock_id", keep="last")
+            )
+        else:
+            working = working.drop_duplicates("stock_id", keep="last")
+        logger.info(
+            "TaiwanStockInfo: %d unique stocks after dedup (total rows before dedup: %d)",
+            len(working),
+            len(self._stock_info),
+        )
 
         # 過濾已下市的股票
         if self._delisting is not None and not self._delisting.empty:
@@ -130,6 +147,44 @@ class HistoricalUniverse:
         if exclude_symbols:
             working = working[~working["stock_id"].isin(exclude_symbols)]
 
+        # --- TWSE 成交金額預篩 + 備用排序（auto_universe_pre_filter_size）---
+        # 一次抓取 TWSE 公開日交易資料（免費），同時用於：
+        #   1. 預篩：把 ~2900 支縮減到流動性前 N 名
+        #   2. 排序備援：若付費 market_value API 不可用，直接以成交金額排序
+        # 確保台積電等大型股不因 OHLCV 快取缺失而被排除在候選名單之外。
+        _twse_turnover: dict[str, float] = {}  # 保留供後續排序使用
+        pre_filter_size = int(portfolio_config.get("auto_universe_pre_filter_size", 0) or 0)
+        if pre_filter_size > 0:
+            try:
+                from src.data.twse_scraper import fetch_combined_turnover
+                _twse_turnover = fetch_combined_turnover(as_of)
+            except Exception as _exc:
+                logger.warning("TWSE scraper import/call failed: %s", _exc)
+
+            if _twse_turnover and len(working) > pre_filter_size:
+                _before_pre = len(working)
+                working["_twse_turnover"] = (
+                    working["stock_id"].map(_twse_turnover).fillna(0.0)
+                )
+                working = (
+                    working
+                    .sort_values(["_twse_turnover", "stock_id"], ascending=[False, True])
+                    .head(pre_filter_size)
+                    .drop(columns=["_twse_turnover"])
+                    .reset_index(drop=True)
+                )
+                logger.info(
+                    "Pre-filter: %d → %d stocks using TWSE turnover at %s",
+                    _before_pre, len(working),
+                    as_of.date() if hasattr(as_of, "date") else as_of,
+                )
+            elif not _twse_turnover:
+                logger.warning(
+                    "TWSE turnover unavailable at %s — skipping pre-filter, using all %d stocks",
+                    as_of.date() if hasattr(as_of, "date") else as_of,
+                    len(working),
+                )
+
         # --- 市值排序與 size limit ---
         size_ranked = False
 
@@ -153,37 +208,55 @@ class HistoricalUniverse:
                 )
                 size_ranked = True
 
+        # 嘗試 1.5: 使用已取得的 TWSE 成交金額排序（免費、無需 OHLCV 快取）
+        # 成交金額 = 當日全市場實際流動性，台積電等大型股必然排前列。
+        if not size_ranked and _twse_turnover:
+            working["_twse_turnover"] = (
+                working["stock_id"].map(_twse_turnover).fillna(0.0)
+            )
+            working = working.sort_values(
+                ["_twse_turnover", "stock_id"], ascending=[False, True]
+            )
+            working = working.drop(columns=["_twse_turnover"])
+            size_ranked = True
+            logger.info(
+                "Size ranking: using TWSE turnover at %s (%d stocks covered)",
+                as_of.date() if hasattr(as_of, "date") else as_of,
+                sum(1 for sid in working["stock_id"] if str(sid) in _twse_turnover),
+            )
+
         # 嘗試 2: 用 close×volume 20日均值做 size proxy（免費 API 即可）
         if not size_ranked and source is not None and hasattr(source, "fetch_ohlcv"):
             logger.info(
-                "market_value API unavailable at %s — computing size proxy from close×volume",
+                "market_value API unavailable at %s — computing size proxy from close×volume (cache-only)",
                 as_of,
             )
-            pre_filter_size = int(portfolio_config.get("auto_universe_pre_filter_size", 0) or 0)
-            universe_before_prefilter = len(working)
-            if pre_filter_size > 0 and len(working) > pre_filter_size:
-                working = working.copy()
-                working["_sid_int"] = pd.to_numeric(working["stock_id"], errors="coerce").fillna(99999)
-                working = working.sort_values("_sid_int")
-                if pre_filter_size == 1:
-                    sample_idx = [0]
-                else:
-                    total = len(working)
-                    sample_idx = [
-                        int(i * (total - 1) / (pre_filter_size - 1))
-                        for i in range(pre_filter_size)
-                    ]
-                working = working.iloc[sample_idx].copy().drop(columns=["_sid_int"])
-                logger.info(
-                    "Universe pre-filter at %s: %d → %d stocks (evenly spaced by stock_id). "
-                    "Set auto_universe_pre_filter_size=0 to disable.",
-                    as_of.date() if hasattr(as_of, "date") else as_of,
-                    universe_before_prefilter,
-                    len(working),
-                )
+            # 僅使用已有磁碟快取的股票：避免對 2000+ 支股票發出 API 呼叫
+            # 耗盡每小時 600 次配額，且導致 TSMC 等未快取大型股被排除在外。
+            # 未在快取中的股票 size_proxy=0，自然排到尾端不入選 top_n。
+            # 後續回測會逐漸填充快取，universe 品質隨時間提升。
+            import os as _os
+            _cache_env = _os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
+            _ohlcv_cache_dir = _os.path.join(_cache_env, "ohlcv")
+            cached_syms: set[str] = set()
+            if _os.path.isdir(_ohlcv_cache_dir):
+                cached_syms = {
+                    f[:-4]  # strip .pkl
+                    for f in _os.listdir(_ohlcv_cache_dir)
+                    if f.endswith(".pkl")
+                }
+            n_cached = sum(1 for sid in working["stock_id"] if str(sid) in cached_syms)
+            logger.info(
+                "Size proxy: %d/%d universe stocks have cached OHLCV at %s",
+                n_cached, len(working),
+                as_of.date() if hasattr(as_of, "date") else as_of,
+            )
             size_proxy: dict[str, float] = {}
             for _, row in working.iterrows():
                 sym = str(row["stock_id"])
+                if sym not in cached_syms:
+                    size_proxy[sym] = 0.0  # 未快取，不發 API 呼叫
+                    continue
                 try:
                     ohlcv = source.fetch_ohlcv(sym, "D", 30)
                     if ohlcv is not None and len(ohlcv) >= 5:
