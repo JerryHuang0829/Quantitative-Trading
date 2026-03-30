@@ -1,95 +1,143 @@
-# Claude 交接 Prompt
+# Claude 接手 Prompt — 台股量化投組系統
 
-最後更新：2026-03-30
-用途：Codex 完成第十七輪複核後，交由 Claude 依目前程式碼與既有 artifact 繼續修正與回測。
+最後更新：2026-03-31
 
-## 工作分工
+請用中文回覆。你是這個專案的研究主導（Claude），負責策略研究、回測分析、overfit 判斷。Codex 是工程驗證者，負責複現回測和程式碼審查。
 
-- Claude 負責：
-  - 實際執行 6M / 3Y backtest
-  - 管理 FinMind quota / token
-  - 產出新的 artifact、log、snapshot
-  - 依交接內容修正程式碼與文件
-- Codex 負責：
-  - 讀碼複核
-  - 檢查 artifact 是否支持結論
-  - 指出殘留風險與下一步建議
+---
 
-## 目前已驗證的狀態
+## 專案現況
 
-### 1. Universe reconstruction — 已修好
+台股 long-only 月度再平衡量化投組系統，使用 `tw_3m_stable` profile。
 
-- `src/backtest/universe.py`：移除 `date <= as_of`、加 `drop_duplicates`
-- `src/data/twse_scraper.py`：TWSE 成交金額排序（免費端點）
-- `auto_universe_pre_filter_size=400` 已在程式碼落地
+### 已完成的里程碑
 
-### 2. Market signal look-ahead — Codex 確認無明顯問題
+| 階段 | 內容 | 狀態 |
+|------|------|------|
+| P0 | Survivorship bias、benchmark 口徑、snapshot 診斷、degraded 定義、跨機器驗證 | ✅ 全部完成 |
+| P1 | `max_same_industry` 2→3（台股電子業主導，2 太嚴格） | ✅ 已落地 + Codex/Claude 雙重驗證 |
+| P2 | `institutional_flow` 10%→0%（rank IC 全期為負 -0.053） | ✅ 已落地 + Codex/Claude 雙重驗證 |
+| P2 | caution exposure 0.70→0.80/0.85 研究 | ✅ 研究完成，**不落地**（overfit） |
 
-- `slicer.set_as_of(rebal_date)` 在前
-- `market_view` 之後才算
-- `_compute_daily_returns()` 不含 rebal 當天報酬
+### 目前正式設定（`config/settings.yaml`）
 
-### 3. Survivorship bias — 已驗證對 2022-2024 無影響
+```yaml
+max_same_industry: 3
+score_weights:
+  price_momentum: 0.55
+  trend_quality: 0.20
+  revenue_momentum: 0.25
+  institutional_flow: 0.00
+exposure:
+  risk_on: 0.96
+  caution: 0.70
+  risk_off: 0.35
+```
 
-- 107 支缺失的已下市股票全部是 2001-2007 年下市的
-- 2015 年後下市且不在 stock_info 的：**0 支**
-- FinMind TaiwanStockInfo 保留了所有 2007 年後下市的股票記錄
+### 目前 Artifact
 
-### 4. Benchmark — 確認為 price-only
+| 回測 | 年化報酬 | Sharpe | Alpha | MDD |
+|------|---------|--------|-------|-----|
+| 6M（2024-H2） | 31.78% | 1.08 | +13.52% | -21.50% |
+| 3Y（2022-2024） | 53.57% | 1.85 | +48.43% | -21.50% |
 
-- FinMind `TaiwanStockPriceAdj` 在目前帳號不可用，所有股票均為未還原除息
-- 組合和 benchmark 同口徑（都是 price-only），alpha 比較大致公平
-- 但雙方都低估約 2-3% 年化殖利率
-- `metrics.json` 已加入 `benchmark_type: "price_only"` 標記
+---
 
-### 5. Snapshot 診斷欄位 — 已補齊
+## 2026-03-31 的改動摘要
 
-新增欄位：
-- `rejected_by_turnover`：成交金額不足
-- `rejected_by_price`：股價低於門檻
-- `rejected_by_history`：歷史資料不足
-- `rejected_by_trend`：趨勢/動能不合格
-- `rejected_by_industry`：產業集中度限制
-- `data_degraded_reasons`：降級原因（`error_rate_high` / `factor_coverage_low`）
+### 參數落地
+- `settings.yaml`：`institutional_flow` 權重 10%→0%，`price_momentum` 45%→55%
 
-### 6. Degraded 定義 — 已改進
+### P2 回測完成
+- 6 組 6M grid：baseline / if5 / if0 / caution80 / caution85 / combo_if5_c80 / combo_if0_c80
+- Top 4 的 3Y 驗證：if0 / caution85 / combo_if0_c80 / combo_if5_c80
+- Overfit 分析：caution 調高的改善來自加槓桿（vol +7%, beta +3.4%），不是選股改善
+- trend_quality 連續化評估：ROI 過低（二元項僅佔總分 3%），跳過
 
-新邏輯：
-- `error_rate_high`：分析錯誤 > 20%
-- `factor_coverage_low`：revenue_momentum 或 institutional_flow 覆蓋率 < 30%
-- 任一觸發 → `data_degraded = true`
+### Codex 驗證（由使用者提交 Codex 執行）
+- IF=0% fresh rerun：6M/3Y 所有指標與 Claude artifact 差異 0.0%
+- `_rank_analyses` 邏輯審查：IF=0 時跳過 active_weights，語義正確
+- market signal 分布確認：caution+risk_off = 77.8%
 
-## 目前 Artifact 結果
+### Claude 獨立複核
+- 逐欄位比對 Claude vs Codex metrics JSON，差異 0.00%
+- `_rank_analyses` 語義審查通過，備註 graceful degradation 行為
+- `6805` coverage warning 評估：IF=0% 後無影響，低優先修復（歸 P4）
+- **P2 正式通過雙重驗證**
 
-### 6M（2024-06-01 → 2024-12-31）
+### md 檔更新
+- `優化紀錄.md`：新增 P2 全部 section（P2.1-P2.6）含 Claude 複核
+- `優化建議.md`：重寫為 P2 完成狀態，加入雙重驗證結果
+- `策略研究.md`：更新 artifact、標記 P1/P2 已落地、研究態度新增方法論
+- `README.md`：回測結果更新為 P2 數據、核心因子標註 IF 已移除
 
-- 年化報酬：7.34%，Sharpe：0.34，Alpha：-10.92%
-- Beta：0.58，data_degraded：false
-- benchmark_type：price_only
+### 回測報告位置
+- `reports/backtests/new_baseline/` — ind3 baseline（IF10%）
+- `reports/backtests/p2_*/` — P2 各組 6M/3Y
+- `reports/backtests/codex_verify/p2_if0/` — Codex fresh rerun
 
-### 3Y（2022-01-01 → 2024-12-31）
+---
 
-- 年化報酬：~40%，Sharpe：~1.55，Alpha：~+35%
-- Beta：~0.52，data_degraded：false
-- （3Y 正在重跑中，精確數字待最終 artifact 為準）
+## 接下來要做的事
 
-## 跨機器回測比對
+### 最高優先：P4.1 Paper Trading 框架
 
-`reports/backtests/` 裡的 artifact 已加入 git，但**不是唯一真相**。
-在新環境（另一台電腦）時：
+P1+P2 的 in-sample 優化已完成，**最重要的下一步是開始累積 out-of-sample 數據**。
 
-1. **必須先重跑** 6M 和 3Y backtest
-2. **比對新舊數字**：
-   - Sharpe / Alpha 差異 < 5% → 正常（TWSE 成交金額每次略有差異）
-   - `total_analyzed`、`n_rebalances` 應完全一致
-   - 持股名單可能有 1-2 支邊際股票差異
-3. **若差異 > 5%** → 排查 FinMind token、TWSE 端點、cache 是否從零重建
+需要做的：
+1. 確認 Docker bot 的 live 再平衡流程能正常跑（`docker compose up -d portfolio-bot`）
+2. 建立 paper trading 記錄機制：每月 12 號記錄策略建議的持股/權重，追蹤模擬績效
+3. 累積至少 6 個月 out-of-sample 數據後，比較與回測預期是否一致
+4. 若 paper trading 績效與回測差異過大（Sharpe 差 > 50%），需診斷原因
 
-### Docker 環境改動（第十七輪）
+### P3 研究（可與 paper trading 並行）
 
-**重要：`docker-compose.override.yml` 已刪除**，其內容（volume mount、PYTHONPATH）
-已合併進 `docker-compose.yml` 主檔。`git pull` 後如果另一台電腦還有舊的 override 檔，
-需刪除或確認 pull 已同步刪除。
+按優先順序：
+
+1. **P3.1 revenue_momentum 覆蓋率**（快速確認）
+   - 查 snapshot 中 `revenue_raw=None` 的股票是否主要是金融業
+   - 若是，79% 覆蓋率可接受，不需修改
+
+2. **P3.2 產業權重限制**（中等工作量）
+   - 目前 `max_same_industry=3` 是檔數限制
+   - 測試加入單一產業總權重 ≤ 30% 的限制
+   - 需修改 `_select_positions` 或 weighting 邏輯
+
+3. **P3.3 position sizing — risk parity lite**（中等工作量）
+   - 目前是 `score_weighted`
+   - 測試波動率倒數加權（ATR 或 rolling std）
+   - 回測對照 6M + 3Y
+
+4. **P3.4 exit framework**（較大工作量）
+   - 期中止損：單檔回撤 > 20% 強制退出
+   - 需修改 engine 支援期中事件
+   - 回測驗證止損是否在波動市場頻繁觸發
+
+### P4 工程化（Paper trading 通過後）
+
+1. `6805` coverage warning 修復（IF=0% 時跳過 institutional fetch）
+2. 券商對接
+3. AI 整合（限定市場風向 + 事件風控，不進 ranking）
+
+---
+
+## 重要研究原則
+
+1. **一次改一項參數**，每項都要回測 6M + 3Y 對照
+2. **Codex 複核**：每個要落地的變更都需 Codex fresh rerun 驗證
+3. **區分「選股改善」和「加槓桿」**：看 vol 和 beta 是否變化。IF 移除是前者（vol 不變），caution 調高是後者（vol +7%）
+4. **不要碰 caution/risk_off exposure**：78% 回測期為 caution/risk_off，任何調整都有嚴重 overfit 風險
+5. **回測命令格式**：
+   ```bash
+   docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
+     --start 2024-06-01 --end 2024-12-31 \
+     --output reports/backtests/<name>/ \
+     --config config/<config>.yaml
+   ```
+
+---
+
+## 跨機器注意事項
 
 ### 另一台電腦操作步驟
 
@@ -97,56 +145,37 @@
 cd Quantitative-Trading
 git pull
 
-# 確認 override 已刪除
-ls docker-compose.override.yml  # 應該 not found
-
 # 確認 .env 已設定 FINMIND_TOKEN
 cat .env
 
 # 如果從未 build 過：
 docker compose build
 
-# 跑回測並與 reports/ 裡的基準數字比對：
-docker compose run --rm backtest --start 2024-06-01 --end 2024-12-31
-docker compose run --rm backtest --start 2022-01-01 --end 2024-12-31
+# 驗證當前設定的回測結果：
+docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
+  --start 2024-06-01 --end 2024-12-31 \
+  --output reports/backtests/verify/
+docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
+  --start 2022-01-01 --end 2024-12-31 \
+  --output reports/backtests/verify/
 ```
 
 注意：
 - 首次跑 3Y 需要較長時間（FinMind 快取從零建立，~15-30 分鐘）
-- `src/data/twse_scraper.py` 是新增檔案，用 `requests`（已在 requirements.txt），不需 rebuild image
+- `docker-compose.override.yml` 已刪除，內容已合併進主檔
+- 跨機器差異 < 5% 為正常（OHLCV cache cold/warm start 差異）
 
-### 第十七輪新增 / 修改的檔案
+---
 
-| 檔案 | 類型 | 說明 |
-|------|------|------|
-| `src/data/twse_scraper.py` | 新增 | TWSE 成交金額 scraper |
-| `src/backtest/universe.py` | 修改 | 移除 date 過濾、加 dedup、加 TWSE 預篩 + 排序 |
-| `src/backtest/engine.py` | 修改 | inf 過濾、snapshot 擴充（7 個 rejection 欄位）、degraded 改進 |
-| `src/backtest/metrics.py` | 修改 | 加入 benchmark_type 標記 |
-| `src/portfolio/tw_stock.py` | 修改 | _select_positions 回傳 rejected_by_industry |
-| `.gitignore` | 修改 | 取消排除 reports/ |
-| `docker-compose.override.yml` | 刪除 | 內容合併進主檔 |
+## 關鍵檔案
 
-## Claude 下一步
-
-### P1：策略層分析（look-ahead 已確認無問題）
-
-- 分析 6M 負 alpha 根因（台積電不被選入 top-8 的因子分數）
-- 評估 `top_n=8` 是否太集中
-- 評估 `institutional_flow` 在大盤強勢期的效果
-
-### P2：因子調參（需基於 P1 分析結論）
-
-- `trend_quality` scaling 校準
-- `hold_buffer` 是否過於保守
-- exposure 是否需要調整
-
-## 回覆格式
-
-```text
-1. Findings
-2. Changes made
-3. Validation
-4. Residual risks
-5. Next actions
-```
+| 檔案 | 用途 |
+|------|------|
+| `config/settings.yaml` | 正式設定（已含 P1+P2 變更） |
+| `src/portfolio/tw_stock.py` | 選股核心（ranking、selection、weighting） |
+| `src/backtest/engine.py` | 回測引擎（point-in-time） |
+| `scripts/run_backtest.py` | 回測 CLI 入口 |
+| `scripts/analyze_institutional_ic.py` | rank IC 離線分析腳本 |
+| `優化紀錄.md` | 完整研究歷程與驗證記錄 |
+| `優化建議.md` | 當前建議與待辦路線圖 |
+| `策略研究.md` | 研究結論與方法論 |

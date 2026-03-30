@@ -1,0 +1,26 @@
+HKCR
+{
+	DJTRADEOBJLibCTS.TradeApp.1 = s 'TradeApp Class'
+	{
+		CLSID = s '{3D9AE46D-5546-46f0-B0DD-D61A48901BD6}'
+	}
+	DJTRADEOBJLibCTS.TradeApp = s 'TradeApp Class'
+	{
+		CLSID = s '{3D9AE46D-5546-46f0-B0DD-D61A48901BD6}'
+		CurVer = s 'DJTRADEOBJLibCTS.TradeApp.1'
+	}
+	NoRemove CLSID
+	{
+		ForceRemove {3D9AE46D-5546-46f0-B0DD-D61A48901BD6} = s 'TradeApp Class'
+		{
+			ProgID = s 'DJTRADEOBJLibCTS.TradeApp.1'
+			VersionIndependentProgID = s 'DJTRADEOBJLibCTS.TradeApp'
+			ForceRemove 'Programmable'
+			InprocServer32 = s '%MODULE%'
+			{
+				val ThreadingModel = s 'Apartment'
+			}
+			'TypeLib' = s '{1A76EA11-506B-407c-93BF-104A1DC0EEE3}'
+		}
+	}
+}

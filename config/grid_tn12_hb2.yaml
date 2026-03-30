@@ -1,0 +1,143 @@
+check_interval: 900
+database:
+  path: data/signals.db
+default_strategy:
+  adx_period: 14
+  atr_period: 14
+  bb_period: 20
+  bb_std: 2
+  macd_fast: 12
+  macd_signal: 9
+  macd_slow: 26
+  rsi_overbought: 70
+  rsi_oversold: 30
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 60
+  volume_breakout_ratio: 1.5
+  volume_ma_period: 20
+heartbeat_interval: 86400
+portfolio:
+  auto_universe_exclude_industries:
+  - ETF
+  - ETN
+  - 受益證券
+  - 存託憑證
+  - 權證
+  auto_universe_exclude_symbols: []
+  auto_universe_include_symbols: []
+  auto_universe_markets:
+  - twse
+  - tpex
+  auto_universe_pre_filter_size: 400
+  auto_universe_size: 80
+  enabled: true
+  exclude_etf: true
+  exposure:
+    caution: 0.7
+    risk_off: 0.35
+    risk_on: 0.96
+  history_limit: 320
+  hold_buffer: 2
+  hold_score_floor: 60
+  market_proxy_symbol: '0050'
+  max_position_weight: 0.12
+  max_same_industry: 3
+  min_avg_turnover: 50000000
+  min_eligible_ratio: 0.3
+  min_holdings: 3
+  min_price: 20
+  monthly_revenue_months: 15
+  profile: tw_3m_stable
+  rebalance_after_close_hour: 14
+  rebalance_day: 12
+  rebalance_frequency: monthly
+  score_weights:
+    institutional_flow: 0.1
+    price_momentum: 0.45
+    revenue_momentum: 0.25
+    trend_quality: 0.2
+  top_n: 12
+  turnover_cost: 0.0047
+  turnover_score_threshold: 6.0
+  use_auto_universe: true
+  use_monthly_revenue: true
+  weight_mode: score_weighted
+symbols:
+- enabled: true
+  market: tw_stock
+  name: 台積電
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2330'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 鴻海
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2317'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 聯發科
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2454'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 台達電
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2308'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 廣達
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2382'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 聯電
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2303'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 富邦金
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2881'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 國泰金
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2882'
+  timeframe: D
+- enabled: true
+  market: tw_stock
+  name: 長榮
+  source: finmind
+  strategy:
+    use_institutional: true
+  symbol: '2603'
+  timeframe: D
+system:
+  mode: tw_stock_portfolio
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env: TELEGRAM_CHAT_ID

@@ -446,6 +446,21 @@ class BacktestEngine:
                     {"symbol": p["symbol"], "weight": p["target_weight"], "score": p["score"]}
                     for p in selection["positions"]
                 ],
+                "factor_detail": [
+                    {
+                        "symbol": item["symbol"],
+                        "rank": item.get("rank"),
+                        "portfolio_score": item.get("portfolio_score"),
+                        "rank_components": item.get("rank_components", {}),
+                        "price_momentum_raw": item.get("price_momentum_raw"),
+                        "trend_quality_raw": item.get("trend_quality_raw"),
+                        "revenue_raw": item.get("revenue_raw"),
+                        "institutional_raw": item.get("institutional_raw"),
+                        "industry": item.get("industry", ""),
+                    }
+                    for item in ranked[:20]
+                    if item.get("eligible", False)
+                ],
                 "config_hash": compute_config_hash(self._portfolio_config),
             }
             monthly_snapshots.append(snapshot)

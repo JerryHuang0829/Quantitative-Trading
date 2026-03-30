@@ -62,16 +62,16 @@ portfolio:
   turnover_cost: 0.0047          # 台股來回成本 ≈ 0.47%
   turnover_score_threshold: 6.0  # 新股 score 需超過被替換股至少 N 分
   # 產業分散
-  max_same_industry: 2           # 同產業最多 N 檔
+  max_same_industry: 3           # 同產業最多 N 檔（P1 驗證：2→3）
   # 權重模式: equal | score_weighted
   weight_mode: score_weighted
   # 安全閥
   min_eligible_ratio: 0.3        # 至少 30% 分析成功才再平衡
   score_weights:
-    price_momentum: 0.45
+    price_momentum: 0.55
     trend_quality: 0.20
     revenue_momentum: 0.25
-    institutional_flow: 0.10
+    institutional_flow: 0.00
 
 symbols:
   - name: 台積電
