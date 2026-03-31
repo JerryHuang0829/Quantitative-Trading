@@ -1,0 +1,124 @@
+{
+  "date": "2026-03-31",
+  "month_key": "2026-03",
+  "market_signal": "caution",
+  "market_regime": "ranging",
+  "gross_exposure": 0.7,
+  "total_candidates": 46,
+  "eligible_candidates": 27,
+  "selected_count": 7,
+  "positions": [
+    {
+      "symbol": "2360",
+      "name": "致茂",
+      "weight": 0.1145,
+      "score": 86.94,
+      "industry": "其他電子業"
+    },
+    {
+      "symbol": "2337",
+      "name": "旺宏",
+      "weight": 0.1046,
+      "score": 79.4,
+      "industry": "半導體業"
+    },
+    {
+      "symbol": "8046",
+      "name": "南電",
+      "weight": 0.1014,
+      "score": 76.94,
+      "industry": "電子工業"
+    },
+    {
+      "symbol": "3189",
+      "name": "景碩",
+      "weight": 0.0975,
+      "score": 73.98,
+      "industry": "半導體業"
+    },
+    {
+      "symbol": "2383",
+      "name": "台光電",
+      "weight": 0.0959,
+      "score": 72.82,
+      "industry": "電子工業"
+    },
+    {
+      "symbol": "3260",
+      "name": "威剛",
+      "weight": 0.0952,
+      "score": 72.22,
+      "industry": "半導體業"
+    },
+    {
+      "symbol": "6442",
+      "name": "光聖",
+      "weight": 0.0909,
+      "score": 68.98,
+      "industry": "電子工業"
+    }
+  ],
+  "top10_ranking": [
+    {
+      "rank": 1,
+      "symbol": "2360",
+      "name": "致茂",
+      "score": 86.94
+    },
+    {
+      "rank": 2,
+      "symbol": "2337",
+      "name": "旺宏",
+      "score": 79.4
+    },
+    {
+      "rank": 3,
+      "symbol": "8046",
+      "name": "南電",
+      "score": 76.94
+    },
+    {
+      "rank": 4,
+      "symbol": "3189",
+      "name": "景碩",
+      "score": 73.98
+    },
+    {
+      "rank": 5,
+      "symbol": "2383",
+      "name": "台光電",
+      "score": 72.82
+    },
+    {
+      "rank": 6,
+      "symbol": "3260",
+      "name": "威剛",
+      "score": 72.22
+    },
+    {
+      "rank": 7,
+      "symbol": "2313",
+      "name": "華通",
+      "score": 71.3
+    },
+    {
+      "rank": 8,
+      "symbol": "3037",
+      "name": "欣興",
+      "score": 70.09
+    },
+    {
+      "rank": 9,
+      "symbol": "3017",
+      "name": "奇鋐",
+      "score": 69.49
+    },
+    {
+      "rank": 10,
+      "symbol": "6442",
+      "name": "光聖",
+      "score": 68.98
+    }
+  ],
+  "config_hash": "4e8e8d73eddfbefd"
+}

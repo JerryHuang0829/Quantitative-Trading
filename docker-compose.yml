@@ -17,6 +17,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./reports:/app/reports
+      - ./tests:/app/tests
     command: ["python", "-u", "main.py"]
     healthcheck:
       test:

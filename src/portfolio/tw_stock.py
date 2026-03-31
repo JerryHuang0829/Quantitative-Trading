@@ -217,6 +217,8 @@ def build_tw_stock_universe(config: dict, source, portfolio_config: dict) -> lis
     seen: set[str] = set()
     for row in candidates:
         symbol = row["symbol"]
+        if symbol in seen:
+            continue
         override = manual_entries.get(symbol, {})
         if symbol in manual_entries and override.get("enabled") is False:
             continue
@@ -631,6 +633,7 @@ def _analyze_symbol(
     structure = int(latest.get("structure", 0) or 0)
 
     avg_turnover_20 = float((df["close"] * df["volume"]).tail(20).mean())
+    volatility_20d = float(df["close"].pct_change().tail(20).std()) if len(df) >= 21 else None
     momentum_3m = _period_return(df["close"], 63)
     momentum_6m = _period_return(df["close"], 126)
     momentum_12m = _period_return(df["close"], 252)
@@ -650,6 +653,19 @@ def _analyze_symbol(
         institutional_df = source.fetch_institutional(symbol)
         institutional_result = score_institutional(institutional_df)
     institutional_raw = float(institutional_result.get("score", 0))
+
+    # 品質因子（ROE × 毛利率 → 0-1 分數）
+    quality_raw = None
+    if hasattr(source, "fetch_financial_quality"):
+        fq = source.fetch_financial_quality(symbol)
+        if fq is not None:
+            roe = fq.get("roe")
+            gm = fq.get("gross_margin")
+            if roe is not None and gm is not None:
+                # ROE clamp 到 0-0.5（0%~50%），毛利率 clamp 到 0-1
+                roe_score = max(0.0, min(roe, 0.5)) / 0.5
+                gm_score = max(0.0, min(gm, 1.0))
+                quality_raw = roe_score * 0.6 + gm_score * 0.4
 
     revenue_yoy = None
     revenue_accel = None
@@ -707,6 +723,8 @@ def _analyze_symbol(
         "revenue_raw": revenue_raw,
         "institutional_raw": institutional_raw,
         "institutional_detail": institutional_result.get("detail", ""),
+        "quality_raw": quality_raw,
+        "volatility_20d": volatility_20d,
         "eligible": len(filters) == 0,
         "filters": filters,
     }
@@ -733,6 +751,7 @@ def _rank_analyses(analyses: list[dict], portfolio_config: dict) -> list[dict]:
         "trend_quality": "trend_quality_raw",
         "revenue_momentum": "revenue_raw",
         "institutional_flow": "institutional_raw",
+        "quality": "quality_raw",
     }
 
     metric_ranks: dict[str, dict[str, float]] = {}
@@ -999,13 +1018,42 @@ def _select_positions(
     }
 
 
+def _cap_and_redistribute(
+    weights: dict[str, float], max_weight: float, max_iterations: int = 10,
+) -> dict[str, float]:
+    """迭代式 redistribution — 確保超過 cap 的 excess 被重新分配給未超標的部位。"""
+    for _ in range(max_iterations):
+        excess = 0.0
+        capped_symbols: set[str] = set()
+        for sym, w in weights.items():
+            if w > max_weight:
+                excess += w - max_weight
+                weights[sym] = max_weight
+                capped_symbols.add(sym)
+        if excess < 1e-6:
+            break
+        uncapped = [sym for sym in weights if sym not in capped_symbols and weights[sym] < max_weight]
+        if not uncapped:
+            break
+        per_share = excess / len(uncapped)
+        for sym in uncapped:
+            weights[sym] += per_share
+    return weights
+
+
 def _calculate_position_weights(
     selected: list[dict],
     exposure: float,
     max_position_weight: float,
     weight_mode: str,
 ) -> dict[str, float]:
-    """根據 weight_mode 計算每檔個股的目標權重。"""
+    """根據 weight_mode 計算每檔個股的目標權重。
+
+    支援三種模式：
+    - score_weighted: 權重 ∝ portfolio_score（高分股多拿）
+    - vol_weighted: 權重 ∝ 1/volatility（低波動股多拿，risk parity lite）
+    - equal: 等權
+    """
     if not selected:
         return {}
 
@@ -1013,26 +1061,29 @@ def _calculate_position_weights(
         scores = {s["symbol"]: max(s.get("portfolio_score", 0), 1.0) for s in selected}
         score_sum = sum(scores.values())
         weights = {sym: (score / score_sum) * exposure for sym, score in scores.items()}
+        weights = _cap_and_redistribute(weights, max_position_weight)
+        return {sym: round(w, 4) for sym, w in weights.items()}
 
-        # P0-6 fix: 迭代式 redistribution — 確保所有 excess 都被重新分配
-        max_iterations = 10
-        for _ in range(max_iterations):
-            excess = 0.0
-            capped_symbols: set[str] = set()
-            for sym, w in weights.items():
-                if w > max_position_weight:
-                    excess += w - max_position_weight
-                    weights[sym] = max_position_weight
-                    capped_symbols.add(sym)
-            if excess < 1e-6:
-                break
-            uncapped = [sym for sym in weights if sym not in capped_symbols and weights[sym] < max_position_weight]
-            if not uncapped:
-                break
-            per_share = excess / len(uncapped)
-            for sym in uncapped:
-                weights[sym] += per_share
-
+    if weight_mode == "vol_weighted":
+        # Risk parity lite: 權重 ∝ 1 / volatility_20d
+        # 波動率越低的股票拿越多權重 → 組合整體波動更平穩
+        inv_vols: dict[str, float] = {}
+        for s in selected:
+            vol = s.get("volatility_20d")
+            if vol is not None and vol > 0:
+                inv_vols[s["symbol"]] = 1.0 / vol
+            else:
+                # 缺波動率資料 → 用中位數波動率的倒數（不偏不倚）
+                inv_vols[s["symbol"]] = None  # type: ignore[assignment]
+        # 用已知的中位數填補 None
+        known = [v for v in inv_vols.values() if v is not None]
+        median_inv_vol = sorted(known)[len(known) // 2] if known else 1.0
+        for sym in inv_vols:
+            if inv_vols[sym] is None:
+                inv_vols[sym] = median_inv_vol
+        inv_sum = sum(inv_vols.values()) or 1.0
+        weights = {sym: (iv / inv_sum) * exposure for sym, iv in inv_vols.items()}
+        weights = _cap_and_redistribute(weights, max_position_weight)
         return {sym: round(w, 4) for sym, w in weights.items()}
 
     # equal weight (default fallback)

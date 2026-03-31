@@ -1,181 +1,169 @@
-# Claude 接手 Prompt — 台股量化投組系統
+# Claude 交接 Prompt
 
 最後更新：2026-03-31
 
-請用中文回覆。你是這個專案的研究主導（Claude），負責策略研究、回測分析、overfit 判斷。Codex 是工程驗證者，負責複現回測和程式碼審查。
+請用中文回覆。  
+這份檔案只保留兩類資訊：
+
+1. Codex 已完成的複核結論  
+2. Claude 下一輪需要驗證 / 處理的事項
 
 ---
 
-## 專案現況
+## 一. Codex 已完成的複核
 
-台股 long-only 月度再平衡量化投組系統，使用 `tw_3m_stable` profile。
+### 1. P3 baseline 與研究分支已核對
 
-### 已完成的里程碑
+正式 baseline 應以這組 artifact 為準：
 
-| 階段 | 內容 | 狀態 |
-|------|------|------|
-| P0 | Survivorship bias、benchmark 口徑、snapshot 診斷、degraded 定義、跨機器驗證 | ✅ 全部完成 |
-| P1 | `max_same_industry` 2→3（台股電子業主導，2 太嚴格） | ✅ 已落地 + Codex/Claude 雙重驗證 |
-| P2 | `institutional_flow` 10%→0%（rank IC 全期為負 -0.053） | ✅ 已落地 + Codex/Claude 雙重驗證 |
-| P2 | caution exposure 0.70→0.80/0.85 研究 | ✅ 研究完成，**不落地**（overfit） |
+- `reports/backtests/p2_if0/backtest_20240601_20241231_metrics.json`
+- `reports/backtests/p2_if0/backtest_20220101_20241231_metrics.json`
 
-### 目前正式設定（`config/settings.yaml`）
+Codex 已確認其關鍵數字為：
 
-```yaml
-max_same_industry: 3
-score_weights:
-  price_momentum: 0.55
-  trend_quality: 0.20
-  revenue_momentum: 0.25
-  institutional_flow: 0.00
-exposure:
-  risk_on: 0.96
-  caution: 0.70
-  risk_off: 0.35
+- 6M：Sharpe `1.0834`、Alpha `+13.52%`、MDD `-21.50%`
+- 3Y：Sharpe `1.8458`、Alpha `+48.43%`、MDD `-21.50%`
+
+### 2. P3 結論方向大致合理
+
+- `vol_weighted` 退步是合理的
+  - 6M 對照：
+    - baseline：Sharpe `1.0834`
+    - `p3_vol_weighted`：Sharpe `0.4796`
+  - 結論：目前這套動能策略不適合用 `1 / vol` 權重做正式配置
+
+- `quality` 目前這版也不適合落地
+  - 6M：
+    - baseline：Sharpe `1.0834`
+    - `p3_4factor`：Sharpe `0.6913`
+  - 3Y：
+    - baseline：Sharpe `1.8458`
+    - `p3_4factor`：Sharpe `1.7932`
+
+### 3. 正式設定目前仍未改動主策略
+
+Codex 已確認：
+
+- `config/settings.yaml`
+  - `weight_mode: score_weighted`
+  - `price_momentum: 0.55`
+  - `trend_quality: 0.20`
+  - `revenue_momentum: 0.25`
+  - `institutional_flow: 0.00`
+
+- `quality` 雖然出現在 `available_metrics`，但目前權重為 0，因此**不影響 ranking 結果**
+
+### 4. 目前仍存在的問題
+
+#### A. `quality` 有執行面副作用
+
+雖然 `quality` 權重為 0，但 `_analyze_symbol()` 仍會無條件呼叫 `fetch_financial_quality()`。  
+這代表：
+
+- 不影響正式排名
+- 但仍增加 API / cache / failure surface
+
+#### B. artifact 路徑不一致
+
+根目錄：
+
+- `reports/backtests/backtest_20240601_20241231_metrics.json`
+- `reports/backtests/backtest_20220101_20241231_metrics.json`
+
+目前不是這輪正式 baseline。  
+如果不整理，之後很容易讀錯結果。
+
+#### C. benchmark 仍是 `price_only`
+
+目前 `tests/test_metrics.py` 仍明確驗證 `benchmark_type == "price_only"`。  
+所以現在的 alpha 不是 total-return benchmark 口徑。
+
+#### D. 測試框架已建立，但未完全覆蓋 P3
+
+目前 repo 內確實有 44 個測試，但 Codex 沒看到直接覆蓋：
+
+- `fetch_financial_quality()`
+- `quality_raw` 的財務語意
+- `quality` 權重為 0 時應不抓資料
+
+---
+
+## 二. Claude 下一輪要做的事
+
+### P0：先處理 `quality` 的關閉語意
+
+請優先修正：
+
+- 只有當 `score_weights["quality"] > 0` 時，才呼叫 `fetch_financial_quality()`
+
+目標是讓：
+
+- `quality=0`
+  等於
+- 不影響排序，也不增加執行成本與資料風險
+
+### P1：整理 baseline artifact 路徑
+
+請決定並落地一個正式規則：
+
+方案 A：
+- 把 `p2_if0` 升成 canonical root artifact
+
+方案 B：
+- 保留 `p2_if0/`，但在 README / md / prompt 明確寫死：
+  - 正式 baseline 一律讀 `reports/backtests/p2_if0/`
+
+不論選哪個方案，請同步更新：
+
+- `Claude-Prompt.md`
+- `優化紀錄.md`
+- `優化建議.md`
+- `策略研究.md`
+
+### P2：對 `quality` 做更嚴格的結論
+
+請把目前的敘述修正為：
+
+- 可以說：`quality` 這一版不建議落地
+- 不要直接寫成：品質因子永久無效
+
+如果你要繼續保留研究路線，請補一段：
+
+- 之後若重啟 quality 研究，應先修 ROE 定義
+- 建議方向：
+  - TTM net income / average equity
+  - 或至少明確區分單季 / 累計 / 年化口徑
+
+### P3：若時間夠，再補測試
+
+建議新增測試：
+
+1. `quality` 權重為 0 時，不應呼叫 `fetch_financial_quality()`
+2. `fetch_financial_quality()` 回傳缺欄位時，`quality_raw` 應安全退化
+3. `benchmark_type` 未來若改 total-return，測試要跟著更新
+
+---
+
+## 三. 目前不要做的事
+
+在這一輪，先不要：
+
+- 把 `vol_weighted` 拉回正式設定
+- 直接刪掉 `quality` 整條研究分支
+- 先改 exposure
+- 先改 `top_n`
+- 先把 AI 加進 ranking
+
+---
+
+## 四. Claude 回覆格式
+
+請用這個格式回覆：
+
+```text
+1. Findings
+2. Changes made
+3. Validation
+4. Residual risks
+5. Next actions
 ```
-
-### 目前 Artifact
-
-| 回測 | 年化報酬 | Sharpe | Alpha | MDD |
-|------|---------|--------|-------|-----|
-| 6M（2024-H2） | 31.78% | 1.08 | +13.52% | -21.50% |
-| 3Y（2022-2024） | 53.57% | 1.85 | +48.43% | -21.50% |
-
----
-
-## 2026-03-31 的改動摘要
-
-### 參數落地
-- `settings.yaml`：`institutional_flow` 權重 10%→0%，`price_momentum` 45%→55%
-
-### P2 回測完成
-- 6 組 6M grid：baseline / if5 / if0 / caution80 / caution85 / combo_if5_c80 / combo_if0_c80
-- Top 4 的 3Y 驗證：if0 / caution85 / combo_if0_c80 / combo_if5_c80
-- Overfit 分析：caution 調高的改善來自加槓桿（vol +7%, beta +3.4%），不是選股改善
-- trend_quality 連續化評估：ROI 過低（二元項僅佔總分 3%），跳過
-
-### Codex 驗證（由使用者提交 Codex 執行）
-- IF=0% fresh rerun：6M/3Y 所有指標與 Claude artifact 差異 0.0%
-- `_rank_analyses` 邏輯審查：IF=0 時跳過 active_weights，語義正確
-- market signal 分布確認：caution+risk_off = 77.8%
-
-### Claude 獨立複核
-- 逐欄位比對 Claude vs Codex metrics JSON，差異 0.00%
-- `_rank_analyses` 語義審查通過，備註 graceful degradation 行為
-- `6805` coverage warning 評估：IF=0% 後無影響，低優先修復（歸 P4）
-- **P2 正式通過雙重驗證**
-
-### md 檔更新
-- `優化紀錄.md`：新增 P2 全部 section（P2.1-P2.6）含 Claude 複核
-- `優化建議.md`：重寫為 P2 完成狀態，加入雙重驗證結果
-- `策略研究.md`：更新 artifact、標記 P1/P2 已落地、研究態度新增方法論
-- `README.md`：回測結果更新為 P2 數據、核心因子標註 IF 已移除
-
-### 回測報告位置
-- `reports/backtests/new_baseline/` — ind3 baseline（IF10%）
-- `reports/backtests/p2_*/` — P2 各組 6M/3Y
-- `reports/backtests/codex_verify/p2_if0/` — Codex fresh rerun
-
----
-
-## 接下來要做的事
-
-### 最高優先：P4.1 Paper Trading 框架
-
-P1+P2 的 in-sample 優化已完成，**最重要的下一步是開始累積 out-of-sample 數據**。
-
-需要做的：
-1. 確認 Docker bot 的 live 再平衡流程能正常跑（`docker compose up -d portfolio-bot`）
-2. 建立 paper trading 記錄機制：每月 12 號記錄策略建議的持股/權重，追蹤模擬績效
-3. 累積至少 6 個月 out-of-sample 數據後，比較與回測預期是否一致
-4. 若 paper trading 績效與回測差異過大（Sharpe 差 > 50%），需診斷原因
-
-### P3 研究（可與 paper trading 並行）
-
-按優先順序：
-
-1. **P3.1 revenue_momentum 覆蓋率**（快速確認）
-   - 查 snapshot 中 `revenue_raw=None` 的股票是否主要是金融業
-   - 若是，79% 覆蓋率可接受，不需修改
-
-2. **P3.2 產業權重限制**（中等工作量）
-   - 目前 `max_same_industry=3` 是檔數限制
-   - 測試加入單一產業總權重 ≤ 30% 的限制
-   - 需修改 `_select_positions` 或 weighting 邏輯
-
-3. **P3.3 position sizing — risk parity lite**（中等工作量）
-   - 目前是 `score_weighted`
-   - 測試波動率倒數加權（ATR 或 rolling std）
-   - 回測對照 6M + 3Y
-
-4. **P3.4 exit framework**（較大工作量）
-   - 期中止損：單檔回撤 > 20% 強制退出
-   - 需修改 engine 支援期中事件
-   - 回測驗證止損是否在波動市場頻繁觸發
-
-### P4 工程化（Paper trading 通過後）
-
-1. `6805` coverage warning 修復（IF=0% 時跳過 institutional fetch）
-2. 券商對接
-3. AI 整合（限定市場風向 + 事件風控，不進 ranking）
-
----
-
-## 重要研究原則
-
-1. **一次改一項參數**，每項都要回測 6M + 3Y 對照
-2. **Codex 複核**：每個要落地的變更都需 Codex fresh rerun 驗證
-3. **區分「選股改善」和「加槓桿」**：看 vol 和 beta 是否變化。IF 移除是前者（vol 不變），caution 調高是後者（vol +7%）
-4. **不要碰 caution/risk_off exposure**：78% 回測期為 caution/risk_off，任何調整都有嚴重 overfit 風險
-5. **回測命令格式**：
-   ```bash
-   docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
-     --start 2024-06-01 --end 2024-12-31 \
-     --output reports/backtests/<name>/ \
-     --config config/<config>.yaml
-   ```
-
----
-
-## 跨機器注意事項
-
-### 另一台電腦操作步驟
-
-```bash
-cd Quantitative-Trading
-git pull
-
-# 確認 .env 已設定 FINMIND_TOKEN
-cat .env
-
-# 如果從未 build 過：
-docker compose build
-
-# 驗證當前設定的回測結果：
-docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
-  --start 2024-06-01 --end 2024-12-31 \
-  --output reports/backtests/verify/
-docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
-  --start 2022-01-01 --end 2024-12-31 \
-  --output reports/backtests/verify/
-```
-
-注意：
-- 首次跑 3Y 需要較長時間（FinMind 快取從零建立，~15-30 分鐘）
-- `docker-compose.override.yml` 已刪除，內容已合併進主檔
-- 跨機器差異 < 5% 為正常（OHLCV cache cold/warm start 差異）
-
----
-
-## 關鍵檔案
-
-| 檔案 | 用途 |
-|------|------|
-| `config/settings.yaml` | 正式設定（已含 P1+P2 變更） |
-| `src/portfolio/tw_stock.py` | 選股核心（ranking、selection、weighting） |
-| `src/backtest/engine.py` | 回測引擎（point-in-time） |
-| `scripts/run_backtest.py` | 回測 CLI 入口 |
-| `scripts/analyze_institutional_ic.py` | rank IC 離線分析腳本 |
-| `優化紀錄.md` | 完整研究歷程與驗證記錄 |
-| `優化建議.md` | 當前建議與待辦路線圖 |
-| `策略研究.md` | 研究結論與方法論 |

@@ -522,6 +522,69 @@ class FinMindSource(DataSource):
             logger.warning("Failed to fetch delisting data: %s", exc)
         return cached
 
+    # -------------------------------------------------------- Financial quality
+
+    def fetch_financial_quality(self, symbol: str) -> dict | None:
+        """取得最新一季的品質指標（ROE、毛利率）。
+
+        使用 FinMind TaiwanStockFinancialStatements + TaiwanStockBalanceSheet。
+        快取 90 天（季報每季才更新）。
+        """
+        cache_key = f"quality:{symbol}"
+        cached = self._disk.load("quality", symbol)
+        meta = self._disk.meta("quality", symbol)
+        if cached is not None and meta:
+            try:
+                if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 90:
+                    # cached is a pickle of dict
+                    return cached.to_dict("records")[0] if hasattr(cached, "to_dict") else cached
+            except Exception:
+                pass
+
+        self._rate_limit()
+        try:
+            start = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+            fs = self.loader.taiwan_stock_financial_statement(stock_id=symbol, start_date=start)
+            if fs is None or fs.empty:
+                return None
+
+            self._rate_limit()
+            bs = self.loader.taiwan_stock_balance_sheet(stock_id=symbol, start_date=start)
+            if bs is None or bs.empty:
+                return None
+
+            # 取最新一季
+            latest_date = fs["date"].max()
+            fs_latest = fs[fs["date"] == latest_date]
+            bs_latest = bs[bs["date"] == latest_date]
+
+            def _get(df, type_key):
+                rows = df[df["type"] == type_key]
+                if rows.empty:
+                    return None
+                return float(rows.iloc[-1]["value"])
+
+            revenue = _get(fs_latest, "Revenue")
+            gross_profit = _get(fs_latest, "GrossProfit")
+            net_income = _get(fs_latest, "IncomeAfterTaxes")
+            equity = _get(bs_latest, "Equity")
+
+            result = {
+                "date": str(latest_date),
+                "roe": (net_income / equity * 4) if equity and net_income and equity > 0 else None,
+                "gross_margin": (gross_profit / revenue) if revenue and gross_profit and revenue > 0 else None,
+            }
+
+            # 存快取（用 DataFrame 包裝以相容 _DiskCache）
+            import pandas as _pd
+            self._disk.save("quality", _pd.DataFrame([result]), symbol)
+            self._disk.save_meta("quality", datetime.now().strftime("%Y-%m-%d"), symbol)
+            return result
+
+        except Exception as exc:
+            logger.debug("Failed to fetch financial quality for %s: %s", symbol, exc)
+            return None
+
     # --------------------------------------------------------- Market status
 
     def is_market_open(self) -> bool:
