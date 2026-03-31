@@ -1,169 +1,156 @@
 # Claude 交接 Prompt
 
-最後更新：2026-03-31
+最後更新：2026-04-01
 
-請用中文回覆。  
-這份檔案只保留兩類資訊：
-
-1. Codex 已完成的複核結論  
-2. Claude 下一輪需要驗證 / 處理的事項
+請用中文回覆。
 
 ---
 
-## 一. Codex 已完成的複核
+## 一. 專案現況總覽
 
-### 1. P3 baseline 與研究分支已核對
+### 策略設定
 
-正式 baseline 應以這組 artifact 為準：
+- 台股 long-only，月中再平衡，`tw_3m_stable` profile
+- 三因子：`price_momentum`（55%）、`trend_quality`（20%）、`revenue_momentum`（25%）
+- 已停用：`institutional_flow`（0%，rank IC 全期為負）、`quality`（0%，稀釋動能）
+- `top_n=8`、`max_same_industry=3`、`caution exposure=0.70`
 
-- `reports/backtests/p2_if0/backtest_20240601_20241231_metrics.json`
-- `reports/backtests/p2_if0/backtest_20220101_20241231_metrics.json`
+### 回測績效
 
-Codex 已確認其關鍵數字為：
+| 回測 | Sharpe | Alpha | MDD | 性質 |
+|------|--------|-------|-----|------|
+| 6M（2024-H2） | 1.08 | +13.52% | -21.50% | In-Sample |
+| 3Y（2022-2024） | 1.85 | +48.43% | -21.50% | In-Sample |
+| **2025 全年** | **1.81** | **+8.16%** | **-19.25%** | **Out-of-Sample** |
+| 4Y（2022-2025） | 1.47 | +26.34% | -31.07% | IS+OOS |
 
-- 6M：Sharpe `1.0834`、Alpha `+13.52%`、MDD `-21.50%`
-- 3Y：Sharpe `1.8458`、Alpha `+48.43%`、MDD `-21.50%`
+OOS Sharpe 1.81 vs IS 1.85，衰減僅 2%。
 
-### 2. P3 結論方向大致合理
+### 完成狀態
 
-- `vol_weighted` 退步是合理的
-  - 6M 對照：
-    - baseline：Sharpe `1.0834`
-    - `p3_vol_weighted`：Sharpe `0.4796`
-  - 結論：目前這套動能策略不適合用 `1 / vol` 權重做正式配置
-
-- `quality` 目前這版也不適合落地
-  - 6M：
-    - baseline：Sharpe `1.0834`
-    - `p3_4factor`：Sharpe `0.6913`
-  - 3Y：
-    - baseline：Sharpe `1.8458`
-    - `p3_4factor`：Sharpe `1.7932`
-
-### 3. 正式設定目前仍未改動主策略
-
-Codex 已確認：
-
-- `config/settings.yaml`
-  - `weight_mode: score_weighted`
-  - `price_momentum: 0.55`
-  - `trend_quality: 0.20`
-  - `revenue_momentum: 0.25`
-  - `institutional_flow: 0.00`
-
-- `quality` 雖然出現在 `available_metrics`，但目前權重為 0，因此**不影響 ranking 結果**
-
-### 4. 目前仍存在的問題
-
-#### A. `quality` 有執行面副作用
-
-雖然 `quality` 權重為 0，但 `_analyze_symbol()` 仍會無條件呼叫 `fetch_financial_quality()`。  
-這代表：
-
-- 不影響正式排名
-- 但仍增加 API / cache / failure surface
-
-#### B. artifact 路徑不一致
-
-根目錄：
-
-- `reports/backtests/backtest_20240601_20241231_metrics.json`
-- `reports/backtests/backtest_20220101_20241231_metrics.json`
-
-目前不是這輪正式 baseline。  
-如果不整理，之後很容易讀錯結果。
-
-#### C. benchmark 仍是 `price_only`
-
-目前 `tests/test_metrics.py` 仍明確驗證 `benchmark_type == "price_only"`。  
-所以現在的 alpha 不是 total-return benchmark 口徑。
-
-#### D. 測試框架已建立，但未完全覆蓋 P3
-
-目前 repo 內確實有 44 個測試，但 Codex 沒看到直接覆蓋：
-
-- `fetch_financial_quality()`
-- `quality_raw` 的財務語意
-- `quality` 權重為 0 時應不抓資料
+| 階段 | 狀態 |
+|------|------|
+| P0 Research Integrity | ✅ 全部完成 |
+| P1 Grid Search（max_same_industry 2→3） | ✅ 落地 + Codex 驗證 |
+| P2 因子/Exposure（IF 0%） | ✅ 落地 + Codex + Claude 雙重驗證 |
+| P3 策略擴展（vol_weighted ❌、quality ❌） | ✅ 研究完成 + Codex 驗證 |
+| 架構評估（Claude + Codex 交叉驗證） | ✅ 完成（6 項 Codex 發現全數確認） |
+| P4.0 Paper trading 可審計性 | ✅ append-only + 讀取 DB |
+| P4.1 Benchmark split 修復 | ✅ `adjust_splits()` 自動前復權 |
+| P4.2 Known-answer test | ✅ 22 個 metrics 測試全通過 |
+| 2025 OOS 回測（8 個區間） | ✅ 全部完成並記錄 |
 
 ---
 
-## 二. Claude 下一輪要做的事
+## 二. 本輪完成的修復（2026-04-01）
 
-### P0：先處理 `quality` 的關閉語意
+### P4.0：Paper Trading 可審計性
 
-請優先修正：
+- `paper_trade.py` 改為 append-only + 讀取 DB（`get_latest_rebalance()`）
+- `paper_trade_eval.py` 只使用正式紀錄（`is_rerun=false`）
+- `database.py` 新增 `get_latest_rebalance()` 方法
+- 7 個 E2E 測試通過
 
-- 只有當 `score_weights["quality"] > 0` 時，才呼叫 `fetch_financial_quality()`
+### P4.1：Benchmark Stock Split 自動前復權
 
-目標是讓：
+- `metrics.py` 新增 `adjust_splits()`：偵測單日跌幅 >40% → 前復權
+- `engine.py:272`：benchmark 日報酬前先經過 split 調整
+- 2025 全年 benchmark 從 -71.52%（失真）修正為 +34.17%（正確）
+- Alpha 從虛高 +113.85% 修正為真實 +8.16%
+- 8 個 `TestAdjustSplits` 測試全通過
 
-- `quality=0`
-  等於
-- 不影響排序，也不增加執行成本與資料風險
+### P4.2：Known-Answer Test
 
-### P1：整理 baseline artifact 路徑
-
-請決定並落地一個正式規則：
-
-方案 A：
-- 把 `p2_if0` 升成 canonical root artifact
-
-方案 B：
-- 保留 `p2_if0/`，但在 README / md / prompt 明確寫死：
-  - 正式 baseline 一律讀 `reports/backtests/p2_if0/`
-
-不論選哪個方案，請同步更新：
-
-- `Claude-Prompt.md`
-- `優化紀錄.md`
-- `優化建議.md`
-- `策略研究.md`
-
-### P2：對 `quality` 做更嚴格的結論
-
-請把目前的敘述修正為：
-
-- 可以說：`quality` 這一版不建議落地
-- 不要直接寫成：品質因子永久無效
-
-如果你要繼續保留研究路線，請補一段：
-
-- 之後若重啟 quality 研究，應先修 ROE 定義
-- 建議方向：
-  - TTM net income / average equity
-  - 或至少明確區分單季 / 累計 / 年化口徑
-
-### P3：若時間夠，再補測試
-
-建議新增測試：
-
-1. `quality` 權重為 0 時，不應呼叫 `fetch_financial_quality()`
-2. `fetch_financial_quality()` 回傳缺欄位時，`quality_raw` 應安全退化
-3. `benchmark_type` 未來若改 total-return，測試要跟著更新
+- 5 個精確值測試（Sharpe、MDD -20%、Alpha/Beta、波動率、總報酬）
+- 22 個 metrics 測試全通過（Windows 本機可跑）
 
 ---
 
-## 三. 目前不要做的事
+## 三. 關鍵檔案位置
 
-在這一輪，先不要：
-
-- 把 `vol_weighted` 拉回正式設定
-- 直接刪掉 `quality` 整條研究分支
-- 先改 exposure
-- 先改 `top_n`
-- 先把 AI 加進 ranking
+| 檔案 | 用途 |
+|------|------|
+| `config/settings.yaml` | 策略參數（唯一正式設定） |
+| `src/backtest/metrics.py` | KPI 計算 + `adjust_splits()` |
+| `src/backtest/engine.py` | 回測引擎（point-in-time 月度再平衡） |
+| `src/portfolio/tw_stock.py` | 核心選股邏輯 |
+| `scripts/paper_trade.py` | Paper trading 記錄器（append-only） |
+| `scripts/paper_trade_eval.py` | Paper trading 績效評估 |
+| `tests/test_metrics.py` | 22 個 metrics + split 測試 |
+| `reports/backtests/split_fix/` | 修復後的 OOS 回測結果 |
+| `reports/paper_trading/history.json` | Paper trading 歷史紀錄 |
 
 ---
 
-## 四. Claude 回覆格式
+## 四. 下一輪最高優先事項
+
+### P4.3：Walk-Forward 驗證框架（3-5 天）
+
+**問題：** 目前只有單次 IS/OOS 比對（2022-2024 vs 2025），缺乏系統化滾動驗證。
+
+**修復方案：** 在 engine.py 新增 `walk_forward_backtest()`：
+- 滾動視窗：18 個月訓練 + 6 個月測試
+- 自動產出多段 OOS 績效曲線
+- 參數穩定性報告（各 window 的 Sharpe/Alpha 分布）
+
+**為什麼重要：** 單次 OOS 可能只是運氣好。多段滾動 OOS 能確認策略在不同市場環境下都有效。
+
+### P4.4-P4.11 待做清單
+
+| 優先度 | 項目 | 工作量 |
+|--------|------|--------|
+| P4.4 | Hardcoded 常數提到 config | 半天 |
+| P4.5 | Total return benchmark（含配息） | 1-2 天 |
+| P4.6 | Drift-aware 日報酬 | 1-2 天 |
+| P4.7 | FinMind as_of plumbing | 2-3 天 |
+| P4.8 | 主題集中風險指標 | 研究題 |
+| P4.9 | `data_degraded` false alarm 修復 | 低優先 |
+| P4.10 | 券商對接 | paper trading 通過後 |
+| P4.11 | AI 整合（市場風向 + 事件風控） | 最後 |
+
+---
+
+## 五. 目前不要做的事
+
+- 調整 `caution/risk_off` exposure（in-sample overfit 風險太高）
+- 把 `vol_weighted` 或 `quality` 拉回正式設定
+- 先改 `exposure` / `top_n`（已研究過，目前設定最佳）
+- 把 AI 加進 ranking（AI 只做市場風向 + 事件風控，不進選股）
+- 在 paper trading 累積 6 個月之前投入實資金
+
+---
+
+## 六. 已知技術限制
+
+- `pandas_ta` 只裝在 Docker，Windows 本機只能跑 `test_metrics.py`
+- 完整測試需在 Docker 跑：`docker compose run --rm --entrypoint python portfolio-bot -m pytest tests/ -v`
+- FinMind 免費版 600 req/hr，3Y 回測需 ~400-500 次呼叫
+- MarketValue API 免費版不可用，fallback 到 size proxy
+- `data_degraded: true` 在 2025 回測是 false alarm（IF coverage=0 因為 IF weight=0）
+
+---
+
+## 七. 文件索引
+
+| 文件 | 內容 |
+|------|------|
+| `README.md` | 專案架構、模組說明、Docker 操作 |
+| `教學進度.md` | 給專案擁有者的學習筆記（白話解說所有概念） |
+| `策略研究.md` | 因子研究結論、P1-P3 決策記錄、OOS 結果 |
+| `優化建議.md` | 雙視角評估（投資人+工程主管）、P4 路線圖 |
+| `優化紀錄.md` | 所有修改的詳細紀錄（P4.1/P4.2 修復、OOS 回測、交叉驗證） |
+| `Claude-Prompt.md` | 本檔（交接用） |
+
+---
+
+## 八. Claude 回覆格式
 
 請用這個格式回覆：
 
 ```text
-1. Findings
-2. Changes made
-3. Validation
-4. Residual risks
-5. Next actions
+1. Findings（發現了什麼）
+2. Changes made（做了什麼改動）
+3. Validation（如何驗證）
+4. Residual risks（殘餘風險）
+5. Next actions（下一步）
 ```

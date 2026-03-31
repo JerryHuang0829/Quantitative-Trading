@@ -16,7 +16,7 @@ from ..portfolio.tw_stock import (
     get_portfolio_config,
 )
 from ..storage.database import compute_config_hash
-from .metrics import compute_metrics, format_report
+from .metrics import adjust_splits, compute_metrics, format_report
 from .universe import HistoricalUniverse
 
 logger = logging.getLogger(__name__)
@@ -266,11 +266,12 @@ class BacktestEngine:
         hist_universe = HistoricalUniverse(slicer)
         hist_universe.load()
 
-        # --- 取得 benchmark 日線報酬 ---
+        # --- 取得 benchmark 日線報酬（含 stock split 自動調整）---
         bench_df = self._source.fetch_ohlcv(benchmark_symbol, "D", 3000)
         benchmark_daily: pd.Series | None = None
         if bench_df is not None and not bench_df.empty:
-            benchmark_daily = bench_df["close"].pct_change().dropna()
+            adjusted_close = adjust_splits(bench_df["close"])
+            benchmark_daily = adjusted_close.pct_change().dropna()
 
         # --- 逐月 replay ---
         monthly_snapshots: list[dict] = []

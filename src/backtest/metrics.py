@@ -5,12 +5,67 @@ from __future__ import annotations
 import logging
 from math import sqrt
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 TRADING_DAYS_PER_YEAR = 252
 RISK_FREE_RATE = 0.015  # 台灣無風險利率假設 1.5%
+
+# Stock split detection: single-day price change exceeding this threshold
+# triggers automatic forward-adjustment.  Common ratios: 1:2 (−50%),
+# 1:4 (−75%), 1:5 (−80%), 1:10 (−90%).  A −40% threshold catches all of
+# these while being well above normal daily moves (Taiwan daily limit ±10%).
+_SPLIT_DETECTION_THRESHOLD = -0.40
+
+
+def adjust_splits(prices: pd.Series) -> pd.Series:
+    """Detect and forward-adjust stock splits in a closing-price series.
+
+    When a single-day price drop exceeds ``_SPLIT_DETECTION_THRESHOLD`` (e.g.
+    −40%), we assume a stock split occurred and multiply all *prior* prices by
+    the split ratio so the series becomes continuous.
+
+    Parameters
+    ----------
+    prices : pd.Series
+        Closing price series indexed by date (must be sorted ascending).
+
+    Returns
+    -------
+    pd.Series
+        Forward-adjusted closing prices (same index, same dtype).
+    """
+    if prices.empty or len(prices) < 2:
+        return prices.copy()
+
+    adjusted = prices.copy().astype(float)
+    daily_ret = adjusted.pct_change()
+    split_mask = daily_ret < _SPLIT_DETECTION_THRESHOLD
+
+    if not split_mask.any():
+        return adjusted
+
+    # Process splits from newest to oldest so earlier adjustments compound
+    split_dates = split_mask[split_mask].index.sort_values(ascending=False)
+    for split_date in split_dates:
+        loc = adjusted.index.get_loc(split_date)
+        if loc == 0:
+            continue
+        price_before = adjusted.iloc[loc - 1]
+        price_after = adjusted.iloc[loc]
+        if price_before == 0:
+            continue
+        ratio = price_after / price_before  # e.g. 0.25 for 1:4 split
+        adjusted.iloc[:loc] *= ratio
+        logger.info(
+            "Split detected on %s: %.2f → %.2f (ratio %.4f), adjusted %d prior prices",
+            split_date.date() if hasattr(split_date, "date") else split_date,
+            price_before, price_after, ratio, loc,
+        )
+
+    return adjusted
 
 
 def compute_metrics(

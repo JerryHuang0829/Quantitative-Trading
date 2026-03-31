@@ -251,6 +251,39 @@ class Database:
         finally:
             conn.close()
 
+    def get_latest_rebalance(self, market: str = "tw_stock") -> dict | None:
+        """取得最新一筆 rebalance 紀錄（含 positions_json / ranking_json）。"""
+        conn = self._get_conn()
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM portfolio_rebalances
+                WHERE market = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (market,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            # 解析 JSON 欄位
+            for key in (
+                "positions_json", "entries_json", "holds_json", "exits_json",
+                "ranking_json", "notes_json", "full_ranked_json",
+                "universe_snapshot_json", "fallback_notes",
+            ):
+                if key in result and result[key]:
+                    try:
+                        result[key] = json.loads(result[key])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            return result
+        finally:
+            conn.close()
+
     def record_portfolio_rebalance(self, snapshot: dict) -> None:
         now = datetime.now(timezone.utc).isoformat()
         market = snapshot.get("market", "tw_stock")

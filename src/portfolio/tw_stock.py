@@ -649,14 +649,17 @@ def _analyze_symbol(
     trend_quality_raw = _trend_quality(close, sma_fast, sma_slow, structure, regime)
 
     institutional_result = {"score": 0, "detail": "disabled"}
-    if strategy.get("use_institutional", True) and hasattr(source, "fetch_institutional"):
+    inst_weight = float(portfolio_config.get("score_weights", {}).get("institutional_flow", 0))
+    if inst_weight > 0 and strategy.get("use_institutional", True) and hasattr(source, "fetch_institutional"):
         institutional_df = source.fetch_institutional(symbol)
         institutional_result = score_institutional(institutional_df)
     institutional_raw = float(institutional_result.get("score", 0))
 
     # 品質因子（ROE × 毛利率 → 0-1 分數）
+    # 只有權重 > 0 時才呼叫 API，避免無效的資料成本
     quality_raw = None
-    if hasattr(source, "fetch_financial_quality"):
+    score_weights = portfolio_config.get("score_weights", {})
+    if float(score_weights.get("quality", 0)) > 0 and hasattr(source, "fetch_financial_quality"):
         fq = source.fetch_financial_quality(symbol)
         if fq is not None:
             roe = fq.get("roe")

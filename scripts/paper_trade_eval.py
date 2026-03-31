@@ -3,6 +3,8 @@
 Reads reports/paper_trading/history.json, fetches actual prices,
 and calculates each month's return + cumulative performance.
 
+Only uses official records (is_rerun=false) for evaluation.
+
 Usage:
     docker compose run --rm --entrypoint python portfolio-bot scripts/paper_trade_eval.py
     python scripts/paper_trade_eval.py
@@ -36,6 +38,25 @@ PERF_PATH = Path("reports/paper_trading/history.json")
 BENCHMARK = "0050"
 
 
+def _get_official_records(history: list[dict]) -> list[dict]:
+    """從 history 中取出每月的正式紀錄（非 rerun），按 month_key 排序。"""
+    seen_months: set[str] = set()
+    official: list[dict] = []
+    # 按 month_key + run_timestamp 排序，取每月第一筆非 rerun
+    sorted_history = sorted(
+        history,
+        key=lambda x: (x["month_key"], x.get("run_timestamp", "")),
+    )
+    for rec in sorted_history:
+        if rec.get("is_rerun", False):
+            continue
+        mk = rec["month_key"]
+        if mk not in seen_months:
+            seen_months.add(mk)
+            official.append(rec)
+    return official
+
+
 def _get_price_on(source: FinMindSource, symbol: str, target_date: str) -> float | None:
     """Get closing price on or near target_date."""
     df = source.fetch_ohlcv(symbol, "D", 30)
@@ -62,8 +83,12 @@ def main():
     with open(PERF_PATH, "r", encoding="utf-8") as f:
         history = json.load(f)
 
-    if len(history) < 2:
-        print(f"只有 {len(history)} 筆紀錄，至少需要 2 個月才能計算報酬。")
+    official = _get_official_records(history)
+
+    if len(official) < 2:
+        total_rerun = sum(1 for h in history if h.get("is_rerun", False))
+        print(f"正式紀錄: {len(official)} 筆（另有 {total_rerun} 筆 rerun）")
+        print(f"至少需要 2 個月的正式紀錄才能計算報酬。")
         print("請在下個月再平衡後再次執行。")
         sys.exit(0)
 
@@ -72,12 +97,12 @@ def main():
     benchmark_cum = 1.0
 
     print("\n" + "=" * 60)
-    print("  Paper Trading Performance")
+    print("  Paper Trading Performance (Official Records Only)")
     print("=" * 60)
 
-    for i in range(len(history) - 1):
-        rec = history[i]
-        next_rec = history[i + 1]
+    for i in range(len(official) - 1):
+        rec = official[i]
+        next_rec = official[i + 1]
         buy_date = rec["date"]
         sell_date = next_rec["date"]
 
@@ -86,7 +111,8 @@ def main():
             cumulative *= (1 + rec["actual_return"])
             if rec.get("benchmark_return") is not None:
                 benchmark_cum *= (1 + rec["benchmark_return"])
-            print(f"  {rec['month_key']}: 投組 {rec['actual_return']:+.2%}  "
+            src_tag = f" [{rec.get('source', '?')}]"
+            print(f"  {rec['month_key']}{src_tag}: 投組 {rec['actual_return']:+.2%}  "
                   f"0050 {rec.get('benchmark_return', 0):+.2%}  "
                   f"(已計算)")
             continue
@@ -94,7 +120,6 @@ def main():
         # Calculate portfolio return
         port_return = 0.0
         positions = rec.get("positions", [])
-        cash_weight = 1.0 - rec["gross_exposure"]
 
         for pos in positions:
             buy_price = _get_price_on(source, pos["symbol"], buy_date)
@@ -118,26 +143,47 @@ def main():
         benchmark_cum *= (1 + bench_return)
 
         alpha = port_return - bench_return
-        print(f"  {rec['month_key']}: 投組 {port_return:+.2%}  "
+        src_tag = f" [{rec.get('source', '?')}]"
+        print(f"  {rec['month_key']}{src_tag}: 投組 {port_return:+.2%}  "
               f"0050 {bench_return:+.2%}  "
               f"Alpha {alpha:+.2%}")
 
     print(f"\n  --- 累積績效 ---")
     print(f"  投組累積報酬:   {cumulative - 1:+.2%}")
     print(f"  0050 累積報酬:  {benchmark_cum - 1:+.2%}")
-    print(f"  累積 Alpha:     {(cumulative - benchmark_cum) / benchmark_cum:+.2%}")
-    print(f"  紀錄月數:       {len(history)}")
-    print(f"  可計算月數:     {len(history) - 1}")
+    if benchmark_cum > 0:
+        print(f"  累積 Alpha:     {(cumulative - benchmark_cum) / benchmark_cum:+.2%}")
+    print(f"  正式紀錄月數:   {len(official)}")
+    print(f"  可計算月數:     {len(official) - 1}")
+
+    # Rerun 統計
+    total_rerun = sum(1 for h in history if h.get("is_rerun", False))
+    if total_rerun > 0:
+        print(f"  Rerun 紀錄:     {total_rerun} 筆（不參與績效計算）")
 
     # Warn if approaching evaluation threshold
-    if len(history) >= 7:
-        print(f"\n  ⚠ 已累積 {len(history)} 個月，可進行初步評估")
-    elif len(history) >= 4:
-        print(f"\n  累積 {len(history)} 個月，再 {7 - len(history)} 個月可初步評估")
+    if len(official) >= 7:
+        print(f"\n  ⚠ 已累積 {len(official)} 個月正式紀錄，可進行初步評估")
+    elif len(official) >= 4:
+        print(f"\n  累積 {len(official)} 個月，再 {7 - len(official)} 個月可初步評估")
 
     print("=" * 60)
 
     if updated:
+        # 把計算結果寫回 history.json（保留所有紀錄包含 rerun）
+        # 找到 official 中被更新的紀錄，回寫到 history
+        official_by_key = {
+            (r["month_key"], r.get("run_timestamp", "")): r
+            for r in official
+        }
+        for h in history:
+            key = (h["month_key"], h.get("run_timestamp", ""))
+            if key in official_by_key:
+                src = official_by_key[key]
+                if src.get("actual_return") is not None and h.get("actual_return") is None:
+                    h["actual_return"] = src["actual_return"]
+                    h["benchmark_return"] = src.get("benchmark_return")
+
         with open(PERF_PATH, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
         print(f"\n  已更新: {PERF_PATH}")
