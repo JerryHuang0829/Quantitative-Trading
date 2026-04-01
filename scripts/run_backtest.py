@@ -178,10 +178,33 @@ def main() -> None:
         encoding="utf-8",
     )
 
+    # 日頻報酬序列（dashboard 累積報酬曲線用）
+    daily_returns_path = output_dir / f"{stem}_daily_returns.json"
+    portfolio_rets = result.get("portfolio_returns")
+    benchmark_rets = result.get("benchmark_returns")
+    daily_data = {}
+    if portfolio_rets is not None and not portfolio_rets.empty:
+        daily_data["portfolio"] = {
+            str(d.date()) if hasattr(d, "date") else str(d): round(float(r), 8)
+            for d, r in portfolio_rets.items()
+        }
+    if benchmark_rets is not None and not benchmark_rets.empty:
+        daily_data["benchmark"] = {
+            str(d.date()) if hasattr(d, "date") else str(d): round(float(r), 8)
+            for d, r in benchmark_rets.items()
+        }
+    if daily_data:
+        daily_returns_path.write_text(
+            json.dumps(daily_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     print(result.get("report", ""))
     print(f"\nSaved metrics to {metrics_path}")
     print(f"Saved report to {report_path}")
     print(f"Saved snapshots to {snapshots_path}")
+    if daily_data:
+        print(f"Saved daily returns to {daily_returns_path}")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,51 @@ logger = logging.getLogger(__name__)
 DEFAULT_SLIPPAGE_BPS = 5
 DEFAULT_ROUND_TRIP_COST = 0.0047
 
+# 廣義科技供應鏈 — 用於 theme_concentration 監控
+_TECH_SUPPLY_CHAIN_KEYWORDS = frozenset([
+    "電子", "半導體", "IC", "光電", "通信", "資訊", "電腦", "電機",
+])
+
+
+def _compute_theme_concentration(
+    positions: list[dict], ranked: list[dict],
+) -> dict:
+    """計算持股的主題集中度（監控用，不影響選股邏輯）。
+
+    Returns dict with:
+      tech_weight: 廣義科技供應鏈的總權重
+      tech_count: 科技相關持股數
+      top_industry: 權重最高的產業
+      top_industry_weight: 該產業的總權重
+      industries: {產業: 權重} 完整分佈
+    """
+    # 建立 symbol → industry 映射（從 ranked 取得，因為 positions 可能不含 industry）
+    ind_map = {item["symbol"]: item.get("industry", "") for item in ranked}
+
+    industry_weights: dict[str, float] = {}
+    tech_weight = 0.0
+    tech_count = 0
+    for p in positions:
+        sym = p.get("symbol", "")
+        w = float(p.get("target_weight", p.get("weight", 0)))
+        ind = p.get("industry") or ind_map.get(sym, "")
+        industry_weights[ind] = industry_weights.get(ind, 0) + w
+        if any(kw in ind for kw in _TECH_SUPPLY_CHAIN_KEYWORDS):
+            tech_weight += w
+            tech_count += 1
+
+    top_ind = max(industry_weights, key=industry_weights.get) if industry_weights else ""
+    return {
+        "tech_weight": round(tech_weight, 4),
+        "tech_count": tech_count,
+        "total_positions": len(positions),
+        "top_industry": top_ind,
+        "top_industry_weight": round(industry_weights.get(top_ind, 0), 4),
+        "industries": {k: round(v, 4) for k, v in sorted(
+            industry_weights.items(), key=lambda x: -x[1]
+        )},
+    }
+
 
 class _DataSlicer:
     """包裝 source，將所有資料截斷到 as_of 日期以避免 look-ahead bias。
@@ -410,12 +455,21 @@ class BacktestEngine:
             else:
                 factor_coverage = {"revenue_momentum": 0.0, "institutional_flow": 0.0}
 
-            # data_degraded 判定：錯誤率 > 20% 或 因子覆蓋率 < 30%
+            # data_degraded 判定：錯誤率 > 20% 或 **使用中的**因子覆蓋率 < 30%
+            # 只檢查權重 > 0 的因子，避免已停用因子（如 IF=0%）觸發 false alarm
             error_degraded = n_errors > n_analyzed * 0.2
-            coverage_degraded = (
-                factor_coverage.get("revenue_momentum", 0) < 0.3
-                or factor_coverage.get("institutional_flow", 0) < 0.3
-            ) if eligible_analyses else False
+            score_weights = self._portfolio_config.get("score_weights", {})
+            coverage_factor_map = {
+                "revenue_momentum": "revenue_momentum",
+                "institutional_flow": "institutional_flow",
+            }
+            coverage_degraded = False
+            if eligible_analyses:
+                for factor_name, coverage_key in coverage_factor_map.items():
+                    weight = float(score_weights.get(factor_name, 0))
+                    if weight > 0 and factor_coverage.get(coverage_key, 0) < 0.3:
+                        coverage_degraded = True
+                        break
             data_degraded = error_degraded or coverage_degraded
 
             # 保存 snapshot
@@ -432,7 +486,12 @@ class BacktestEngine:
                 "data_degraded": data_degraded,
                 "data_degraded_reasons": (
                     (["error_rate_high"] if error_degraded else [])
-                    + (["factor_coverage_low"] if coverage_degraded else [])
+                    + ([
+                        f"factor_coverage_low:{k}"
+                        for k, v in coverage_factor_map.items()
+                        if float(score_weights.get(k, 0)) > 0
+                        and factor_coverage.get(v, 0) < 0.3
+                    ] if coverage_degraded else [])
                 ),
                 "factor_coverage": factor_coverage,
                 "eligible_list": eligible_list,
@@ -444,9 +503,13 @@ class BacktestEngine:
                 "rejected_by_trend": rejected_by_trend,
                 "rejected_by_industry": rejected_by_industry,
                 "positions": [
-                    {"symbol": p["symbol"], "weight": p["target_weight"], "score": p["score"]}
+                    {"symbol": p["symbol"], "weight": p["target_weight"], "score": p["score"],
+                     "industry": p.get("industry", "")}
                     for p in selection["positions"]
                 ],
+                "theme_concentration": _compute_theme_concentration(
+                    selection["positions"], ranked,
+                ),
                 "factor_detail": [
                     {
                         "symbol": item["symbol"],

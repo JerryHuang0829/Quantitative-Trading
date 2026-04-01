@@ -6,3 +6,5 @@ PyYAML>=6.0
 tenacity>=8.0.0
 FinMind>=1.6.0
 pytest>=7.0.0
+streamlit>=1.30.0
+plotly>=5.18.0
