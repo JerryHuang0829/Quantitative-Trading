@@ -18,14 +18,23 @@ RISK_FREE_RATE = 0.015  # 台灣無風險利率假設 1.5%
 # 1:4 (−75%), 1:5 (−80%), 1:10 (−90%).  A −40% threshold catches all of
 # these while being well above normal daily moves (Taiwan daily limit ±10%).
 _SPLIT_DETECTION_THRESHOLD = -0.40
+# Reverse split (consolidation) detection: single-day price jump exceeding
+# this threshold triggers automatic adjustment.  Taiwan daily limit is +10%,
+# so any single-day gain >100% must be a reverse split (e.g. 10:1 = +900%).
+_REVERSE_SPLIT_THRESHOLD = 1.00
 
 
 def adjust_splits(prices: pd.Series) -> pd.Series:
-    """Detect and forward-adjust stock splits in a closing-price series.
+    """Detect and forward-adjust stock splits/reverse splits in a closing-price series.
 
     When a single-day price drop exceeds ``_SPLIT_DETECTION_THRESHOLD`` (e.g.
-    −40%), we assume a stock split occurred and multiply all *prior* prices by
-    the split ratio so the series becomes continuous.
+    −40%), we assume a forward stock split occurred and multiply all *prior*
+    prices by the split ratio (< 1) so the series becomes continuous.
+
+    When a single-day price jump meets or exceeds ``_REVERSE_SPLIT_THRESHOLD``
+    (e.g. +100%), we assume a reverse split (consolidation) occurred and
+    multiply all *prior* prices by the consolidation ratio (> 1) so the series
+    becomes continuous.  Both cases use the same ``prior *= ratio`` logic.
 
     Parameters
     ----------
@@ -42,7 +51,9 @@ def adjust_splits(prices: pd.Series) -> pd.Series:
 
     adjusted = prices.copy().astype(float)
     daily_ret = adjusted.pct_change()
-    split_mask = daily_ret < _SPLIT_DETECTION_THRESHOLD
+
+    # Detect both forward splits (big drops) and reverse splits (big jumps)
+    split_mask = (daily_ret < _SPLIT_DETECTION_THRESHOLD) | (daily_ret >= _REVERSE_SPLIT_THRESHOLD)
 
     if not split_mask.any():
         return adjusted
@@ -57,10 +68,12 @@ def adjust_splits(prices: pd.Series) -> pd.Series:
         price_after = adjusted.iloc[loc]
         if price_before == 0:
             continue
-        ratio = price_after / price_before  # e.g. 0.25 for 1:4 split
+        ratio = price_after / price_before  # e.g. 0.25 for 1:4 split, 10.0 for 10:1 reverse
         adjusted.iloc[:loc] *= ratio
+        split_type = "Reverse split" if ratio > 1 else "Split"
         logger.info(
-            "Split detected on %s: %.2f → %.2f (ratio %.4f), adjusted %d prior prices",
+            "%s detected on %s: %.2f → %.2f (ratio %.4f), adjusted %d prior prices",
+            split_type,
             split_date.date() if hasattr(split_date, "date") else split_date,
             price_before, price_after, ratio, loc,
         )

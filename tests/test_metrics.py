@@ -257,3 +257,64 @@ class TestAdjustSplits:
         adjusted = adjust_splits(prices)
         # 不應有任何調整
         pd.testing.assert_series_equal(adjusted, prices.astype(float))
+
+    def test_reverse_split_10_to_1(self):
+        """模擬 10:1 合股：50 → 500（+900%）。
+        合股前價格應全部乘以 10。"""
+        prices = pd.Series(
+            [48.0, 50.0, 500.0, 510.0],  # 10:1 reverse split
+            index=pd.date_range("2024-01-01", periods=4),
+        )
+        adjusted = adjust_splits(prices)
+        # 合股後不變
+        assert adjusted.iloc[2] == 500.0
+        assert adjusted.iloc[3] == 510.0
+        # 合股前乘以 500/50 = 10
+        assert abs(adjusted.iloc[0] - 480.0) < 0.01  # 48 * 10
+        assert abs(adjusted.iloc[1] - 500.0) < 0.01  # 50 * 10
+
+    def test_reverse_split_5_to_1(self):
+        """模擬 5:1 合股：20 → 100（+400%）。"""
+        prices = pd.Series(
+            [18.0, 20.0, 100.0, 105.0],
+            index=pd.date_range("2024-01-01", periods=4),
+        )
+        adjusted = adjust_splits(prices)
+        assert abs(adjusted.iloc[0] - 90.0) < 0.01   # 18 * 5
+        assert abs(adjusted.iloc[1] - 100.0) < 0.01  # 20 * 5
+        assert adjusted.iloc[2] == 100.0
+        assert adjusted.iloc[3] == 105.0
+
+    def test_reverse_split_continuous_returns(self):
+        """合股調整後日報酬不應有 >100% 的跳動。"""
+        prices = pd.Series(
+            [10.0, 11.0, 110.0, 115.0],  # 10:1 reverse split
+            index=pd.date_range("2024-01-01", periods=4),
+        )
+        adjusted = adjust_splits(prices)
+        daily_ret = adjusted.pct_change().dropna()
+        assert daily_ret.max() < 1.00  # 不再有合股造成的大漲
+
+    def test_reverse_split_2_to_1_boundary(self):
+        """2:1 合股邊界：50 → 100（剛好 +100%）。
+        _REVERSE_SPLIT_THRESHOLD=1.00 用 >= 才能涵蓋此情境。"""
+        prices = pd.Series(
+            [48.0, 50.0, 100.0, 105.0],  # 2:1 reverse split, exactly +100%
+            index=pd.date_range("2024-01-01", periods=4),
+        )
+        adjusted = adjust_splits(prices)
+        # 合股後不變
+        assert adjusted.iloc[2] == 100.0
+        assert adjusted.iloc[3] == 105.0
+        # 合股前乘以 100/50 = 2
+        assert abs(adjusted.iloc[0] - 96.0) < 0.01   # 48 * 2
+        assert abs(adjusted.iloc[1] - 100.0) < 0.01  # 50 * 2
+
+    def test_normal_limit_up_not_detected(self):
+        """台股漲停 +10%，連續漲停也不應誤判為 reverse split。"""
+        prices = pd.Series(
+            [100.0, 110.0, 121.0, 133.1],  # 連續漲停 +10%
+            index=pd.date_range("2024-01-01", periods=4),
+        )
+        adjusted = adjust_splits(prices)
+        pd.testing.assert_series_equal(adjusted, prices.astype(float))

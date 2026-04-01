@@ -435,6 +435,8 @@ class FinMindSource(DataSource):
         meta = self._disk.meta("stock_info")
         if cached is not None and meta:
             if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+                # pickle cache 有效 — 確保 CSV 備援也存在
+                self._ensure_stock_info_csv(cached)
                 return cached
 
         self._rate_limit()
@@ -445,18 +447,50 @@ class FinMindSource(DataSource):
                 logger.warning("Stock info dataset unavailable with current FinMind access")
             else:
                 logger.warning("Failed to fetch stock info: %s", exc)
-            return cached
+            return cached or self._load_stock_info_csv_fallback()
         except Exception as exc:
             logger.warning("Failed to fetch stock info: %s", exc)
-            return cached
+            return cached or self._load_stock_info_csv_fallback()
 
         if df is None or df.empty:
-            return cached
+            return cached or self._load_stock_info_csv_fallback()
 
         result = df.copy()
         self._disk.save("stock_info", result)
         self._disk.save_meta("stock_info", datetime.now().strftime("%Y-%m-%d"))
+        # 每次 API 成功後同步更新 CSV 快照，供 pickle 損壞時作為最終備援
+        self._save_stock_info_csv_snapshot(result)
         return result
+
+    def _load_stock_info_csv_fallback(self) -> pd.DataFrame | None:
+        """最終備援：從本地 CSV 快照讀取 stock_info。"""
+        csv_path = self._disk._dir / "stock_info" / "stock_info_snapshot.csv"
+        if not csv_path.exists():
+            logger.warning("No CSV fallback for stock_info at %s", csv_path)
+            return None
+        try:
+            df = pd.read_csv(csv_path, dtype=str)
+            logger.info("Loaded stock_info from CSV fallback (%d rows)", len(df))
+            return df
+        except Exception as exc:
+            logger.warning("Failed to read stock_info CSV fallback: %s", exc)
+            return None
+
+    def _save_stock_info_csv_snapshot(self, df: pd.DataFrame) -> None:
+        """將 stock_info 存為 CSV 快照（UTF-8），供 pickle 備援。"""
+        try:
+            csv_path = self._disk._dir / "stock_info" / "stock_info_snapshot.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(csv_path, index=False, encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to save stock_info CSV snapshot: %s", exc)
+
+    def _ensure_stock_info_csv(self, df: pd.DataFrame) -> None:
+        """確保 CSV 備援存在；已存在則跳過，避免每次 cache hit 都寫磁碟。"""
+        csv_path = self._disk._dir / "stock_info" / "stock_info_snapshot.csv"
+        if not csv_path.exists():
+            logger.info("CSV snapshot missing — creating from pickle cache")
+            self._save_stock_info_csv_snapshot(df)
 
     # --------------------------------------------------------- Market Value
 

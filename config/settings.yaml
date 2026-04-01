@@ -27,6 +27,16 @@ default_strategy:
   volume_ma_period: 20
   volume_breakout_ratio: 1.5
 
+backtest:
+  # --- 資料抓取天數 ---
+  benchmark_lookback_days: 3000       # benchmark OHLCV 歷史天數
+  ohlcv_min_fetch_days: 2000          # 單股 OHLCV 最小抓取天數
+  market_value_fetch_days: 2500       # 市值資料抓取天數
+  institutional_fallback_days: 500    # 法人買賣超 fallback 天數（無 backtest_start 時）
+  # --- data_degraded 閾值 ---
+  error_rate_threshold: 0.2           # 分析錯誤率超過此值判定 degraded
+  factor_coverage_threshold: 0.3      # 因子覆蓋率低於此值判定 degraded
+
 portfolio:
   profile: tw_3m_stable
   enabled: true

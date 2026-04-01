@@ -1129,6 +1129,13 @@ def _metric_ranks(items: list[dict], key: str) -> tuple[dict[str, float], bool]:
     if not values:
         return ({item["symbol"]: 0.5 for item in items}, False)
 
+    nan_count = len(items) - len(values)
+    if nan_count > len(items) * 0.5:
+        logger.warning(
+            "Factor '%s': %d/%d stocks have NaN/Inf (>50%%) — ranking may be unreliable",
+            key, nan_count, len(items),
+        )
+
     series = pd.Series(values, dtype="float64")
     ranks = series.rank(pct=True, ascending=True, method="average")
     output = {item["symbol"]: 0.5 for item in items}

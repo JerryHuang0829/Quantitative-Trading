@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 
 from src.storage.database import Database
-from src.utils.constants import TW_TZ
+from src.utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS, TW_TZ
 
 logging.basicConfig(
     level=logging.INFO,
@@ -251,6 +251,27 @@ def main():
     if not record.get("is_rerun"):
         record["actual_return"] = None
 
+    # --- 計算集中度（必須在寫入 JSON 之前）---
+    industry_weights: dict[str, float] = {}
+    tech_weight = 0.0
+    tech_count = 0
+    for p in record["positions"]:
+        w = float(p.get("weight", 0))
+        ind = p.get("industry", "未知")
+        industry_weights[ind] = industry_weights.get(ind, 0) + w
+        if any(kw in ind for kw in TECH_SUPPLY_CHAIN_KEYWORDS):
+            tech_weight += w
+            tech_count += 1
+    top_ind = max(industry_weights, key=industry_weights.get) if industry_weights else ""
+    top_ind_w = industry_weights.get(top_ind, 0)
+
+    record["theme_concentration"] = {
+        "tech_weight": round(tech_weight, 4),
+        "tech_count": tech_count,
+        "top_industry": top_ind,
+        "top_industry_weight": round(top_ind_w, 4),
+    }
+
     # --- 儲存月度 JSON（帶時間戳，不覆寫）---
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{month_key}_{run_ts}.json"
@@ -274,9 +295,12 @@ def main():
     print(f"  市場訊號:   {record['market_signal']}")
     print(f"  總曝險:     {record['gross_exposure']:.0%}")
     print(f"  持股數:     {record['selected_count']}")
+    print(f"\n  --- 集中度監控 ---")
+    print(f"    科技供應鏈：{tech_weight:.0%}（{tech_count} 檔）")
+    print(f"    最大產業：{top_ind} {top_ind_w:.0%}")
     print(f"\n  --- 建議持股 ---")
     for p in record["positions"]:
-        print(f"    {p['symbol']} {p['name']:　<6} 權重 {p['weight']:.1%}  分數 {p['score']:.1f}")
+        print(f"    {p['symbol']} {p['name']:　<6} 權重 {p['weight']:.1%}  分數 {p['score']:.1f}  [{p.get('industry', '')}]")
     print(f"\n  --- Top 10 排名 ---")
     for r in record["top10_ranking"]:
         print(f"    #{r['rank']} {r['symbol']} {r['name']:　<6} {r['score']:.1f}")

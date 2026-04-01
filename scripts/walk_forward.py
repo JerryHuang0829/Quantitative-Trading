@@ -142,6 +142,7 @@ def main():
                 "beta": metrics.get("beta"),
                 "n_rebalances": metrics.get("n_rebalances"),
                 "data_degraded": metrics.get("data_degraded"),
+                "degraded_periods": metrics.get("degraded_periods", 0),
             }
             results.append(entry)
 

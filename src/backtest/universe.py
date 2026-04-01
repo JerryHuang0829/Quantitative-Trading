@@ -61,6 +61,11 @@ class HistoricalUniverse:
 
         working = self._stock_info.copy()
 
+        # --- stock_id 欄位 guard（必須在 dedup 之前，否則 sort_values 會 KeyError）---
+        if "stock_id" not in working.columns:
+            logger.warning("stock_info has no 'stock_id' column — returning empty universe")
+            return []
+
         # 注意：TaiwanStockInfo.date 是 FinMind 的「記錄更新時間戳記」，
         # 不是 IPO 日期。用 date <= as_of 過濾會把絕大多數合法上市股票排除
         # （實測：2022-01-12 只剩 95 支，2024-12-12 才有 460 支）。
@@ -94,12 +99,7 @@ class HistoricalUniverse:
                 delisted_before = set(
                     delisted[delisted["date"] <= as_of_ts]["stock_id"].astype(str)
                 )
-                if "stock_id" in working.columns:
-                    working = working[~working["stock_id"].astype(str).isin(delisted_before)]
-
-        # --- 基本過濾（與 _prepare_auto_universe 相同邏輯）---
-        if "stock_id" not in working.columns:
-            return []
+                working = working[~working["stock_id"].astype(str).isin(delisted_before)]
 
         working["stock_id"] = working["stock_id"].astype(str).str.strip()
         # 保留 4 位股票代碼，以及 00xxxx 類 6 位 ETF 家族代碼。
@@ -282,6 +282,12 @@ class HistoricalUniverse:
         limit = int(portfolio_config.get("auto_universe_size", 80) or 0)
         if limit > 0:
             working = working.head(limit)
+
+        logger.info(
+            "Universe at %s: %d stocks (limit=%d, size_ranked=%s)",
+            as_of.date() if hasattr(as_of, "date") else as_of,
+            len(working), limit, size_ranked,
+        )
 
         result = []
         for _, row in working.iterrows():

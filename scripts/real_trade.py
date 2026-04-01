@@ -220,12 +220,31 @@ def cmd_close(month_key: str):
     total_profit = total_market_value - total_cost
     total_return = total_profit / total_cost if total_cost > 0 else 0
 
-    # 載入 paper trading 同期數據比較
-    paper_path = PAPER_TRADING_DIR / f"{month_key}.json"
-    paper_return = None
-    if paper_path.exists():
-        paper = _load_json(paper_path)
-        paper_return = paper.get("actual_return")
+    # 載入 paper trading 同期數據比較（比對持股重疊度）
+    paper_positions = []
+    for p in sorted(PAPER_TRADING_DIR.glob(f"{month_key}_*.json")):
+        try:
+            data = _load_json(p)
+            if data.get("positions"):
+                paper_positions = data["positions"]
+                break  # 使用該月第一筆正式紀錄
+        except Exception:
+            pass
+    # Fallback：嘗試 history.json
+    if not paper_positions:
+        history_path = PAPER_TRADING_DIR / "history.json"
+        if history_path.exists():
+            history = _load_json(history_path)
+            for h in history:
+                if h.get("month_key") == month_key and not h.get("is_rerun") and h.get("positions"):
+                    paper_positions = h["positions"]
+                    break
+    paper_symbols = {p["symbol"] for p in paper_positions}
+    real_symbols = set(portfolio.keys())
+
+    # 計算持股重疊度
+    overlap = real_symbols & paper_symbols
+    overlap_ratio = len(overlap) / len(paper_symbols) if paper_symbols else None
 
     record = {
         "month_key": month_key,
@@ -234,7 +253,10 @@ def cmd_close(month_key: str):
         "total_market_value": round(total_market_value, 2),
         "total_profit": round(total_profit, 2),
         "total_return": round(total_return, 4),
-        "paper_return": paper_return,
+        "paper_overlap_ratio": overlap_ratio,
+        "paper_overlap_symbols": sorted(overlap) if overlap else [],
+        "paper_only_symbols": sorted(paper_symbols - real_symbols) if paper_symbols else [],
+        "real_only_symbols": sorted(real_symbols - paper_symbols) if paper_symbols else [],
         "positions": positions,
     }
 
@@ -257,10 +279,17 @@ def cmd_close(month_key: str):
     emoji = "📈" if total_profit >= 0 else "📉"
     print(f"  {emoji} 損益：{total_profit:+,.0f} 元（{total_return:+.1%}）")
 
-    if paper_return is not None:
-        diff = total_return - paper_return
-        print(f"\n  Paper Trading 報酬：{paper_return:+.1%}")
-        print(f"  差異：{diff:+.1%}")
+    if paper_symbols:
+        print(f"\n  --- Paper Trading 比對 ---")
+        print(f"  Paper 建議持股：{', '.join(sorted(paper_symbols))}")
+        print(f"  實盤持股：{', '.join(sorted(real_symbols))}")
+        print(f"  重疊率：{overlap_ratio:.0%}（{len(overlap)}/{len(paper_symbols)}）")
+        if overlap:
+            print(f"  重疊：{', '.join(sorted(overlap))}")
+        if paper_symbols - real_symbols:
+            print(f"  Paper 有/實盤無：{', '.join(sorted(paper_symbols - real_symbols))}")
+        if real_symbols - paper_symbols:
+            print(f"  實盤有/Paper 無：{', '.join(sorted(real_symbols - paper_symbols))}")
     print("=" * 50)
 
 
@@ -283,30 +312,21 @@ def cmd_report():
     print(f"  交易手續費合計：{total_fees:,.0f} 元")
     print(f"  證交稅合計：{total_tax:,.0f} 元")
 
-    print(f"\n  {'月份':>8}  {'實盤':>8}  {'模擬':>8}  {'差異':>8}")
-    print("  " + "-" * 40)
+    print(f"\n  {'月份':>8}  {'實盤':>8}  {'重疊率':>8}")
+    print("  " + "-" * 32)
 
     cum_real = 1.0
-    cum_paper = 1.0
     for p in performance:
         real_ret = p.get("total_return", 0)
-        paper_ret = p.get("paper_return")
         cum_real *= (1 + real_ret)
 
         real_str = f"{real_ret:+.1%}"
-        if paper_ret is not None:
-            cum_paper *= (1 + paper_ret)
-            paper_str = f"{paper_ret:+.1%}"
-            diff_str = f"{real_ret - paper_ret:+.1%}"
-        else:
-            paper_str = "—"
-            diff_str = "—"
+        overlap = p.get("paper_overlap_ratio")
+        overlap_str = f"{overlap:.0%}" if overlap is not None else "—"
 
-        print(f"  {p['month_key']:>8}  {real_str:>8}  {paper_str:>8}  {diff_str:>8}")
+        print(f"  {p['month_key']:>8}  {real_str:>8}  {overlap_str:>8}")
 
     print(f"\n  累積實盤報酬：{cum_real - 1:+.1%}")
-    if any(p.get("paper_return") is not None for p in performance):
-        print(f"  累積模擬報酬：{cum_paper - 1:+.1%}")
     print("=" * 50)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from ..portfolio.tw_stock import (
     get_portfolio_config,
 )
 from ..storage.database import compute_config_hash
+from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS
 from .metrics import adjust_splits, compute_metrics, format_report
 from .universe import HistoricalUniverse
 
@@ -23,11 +25,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SLIPPAGE_BPS = 5
 DEFAULT_ROUND_TRIP_COST = 0.0047
-
-# 廣義科技供應鏈 — 用於 theme_concentration 監控
-_TECH_SUPPLY_CHAIN_KEYWORDS = frozenset([
-    "電子", "半導體", "IC", "光電", "通信", "資訊", "電腦", "電機",
-])
 
 
 def _compute_theme_concentration(
@@ -53,7 +50,7 @@ def _compute_theme_concentration(
         w = float(p.get("target_weight", p.get("weight", 0)))
         ind = p.get("industry") or ind_map.get(sym, "")
         industry_weights[ind] = industry_weights.get(ind, 0) + w
-        if any(kw in ind for kw in _TECH_SUPPLY_CHAIN_KEYWORDS):
+        if any(kw in ind for kw in TECH_SUPPLY_CHAIN_KEYWORDS):
             tech_weight += w
             tech_count += 1
 
@@ -83,6 +80,10 @@ class _DataSlicer:
         as_of: datetime | None = None,
         backtest_start: datetime | None = None,
         reference_now: datetime | None = None,
+        *,
+        ohlcv_min_fetch_days: int = 2000,
+        market_value_fetch_days: int = 2500,
+        institutional_fallback_days: int = 500,
     ):
         self._source = source
         self._as_of: pd.Timestamp | None = None
@@ -92,6 +93,9 @@ class _DataSlicer:
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._df_cache: dict[str, pd.DataFrame] = {}
         self._inst_coverage_warned: bool = False  # 只對同一 slicer 警告一次
+        self._ohlcv_min_fetch = ohlcv_min_fetch_days
+        self._mv_fetch_days = market_value_fetch_days
+        self._inst_fallback_days = institutional_fallback_days
         if as_of is not None:
             self.set_as_of(as_of)
 
@@ -154,7 +158,7 @@ class _DataSlicer:
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame | None:
         """回傳截至 as_of 的 OHLCV 切片。"""
         if symbol not in self._ohlcv_cache:
-            df = self._source.fetch_ohlcv(symbol, "D", max(limit, 2000))
+            df = self._source.fetch_ohlcv(symbol, "D", max(limit, self._ohlcv_min_fetch))
             # 無論成功或失敗都 cache（失敗以空 DataFrame 作為哨兵值），
             # 避免下一個再平衡週期對同一標的重複發出 API 請求。
             self._ohlcv_cache[symbol] = df if (df is not None and not df.empty) else pd.DataFrame()
@@ -171,7 +175,7 @@ class _DataSlicer:
     def fetch_institutional(self, symbol: str, days: int = 30) -> pd.DataFrame | None:
         cache_key = f"inst:{symbol}"
         if cache_key not in self._df_cache:
-            # 若知道回測起始日，依此計算需覆蓋的天數；否則退回固定 500 天
+            # 若知道回測起始日，依此計算需覆蓋的天數；否則退回 config 設定的 fallback 天數
             if self._backtest_start is not None:
                 # FinMindSource 內部以 trading_days * 1.5 換算為 calendar days 窗口。
                 # 反向計算：ceil(calendar_days / 1.5) 取保守上界，確保起點早於 backtest_start。
@@ -179,7 +183,7 @@ class _DataSlicer:
                 calendar_days_needed = (self._reference_now - self._backtest_start).days + 60
                 fetch_days = math.ceil(calendar_days_needed / 1.5)
             else:
-                fetch_days = max(days, 500)
+                fetch_days = max(days, self._inst_fallback_days)
             df = self._source.fetch_institutional(symbol, fetch_days)
             if df is not None and not df.empty:
                 # Coverage guard：確認抓到的資料起點早於 backtest_start
@@ -220,7 +224,7 @@ class _DataSlicer:
 
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
         if "market_value" not in self._df_cache:
-            mv = self._source.fetch_market_value(days=max(days, 2500))
+            mv = self._source.fetch_market_value(days=max(days, self._mv_fetch_days))
             self._df_cache["market_value"] = (
                 mv if (mv is not None and not mv.empty) else pd.DataFrame()
             )
@@ -268,6 +272,14 @@ class BacktestEngine:
         self._round_trip_cost = float(
             self._portfolio_config.get("turnover_cost", DEFAULT_ROUND_TRIP_COST)
         )
+        # backtest section defaults（向後相容：config 無此 section 時用原有預設值）
+        _bt = config.get("backtest", {})
+        self._benchmark_lookback = int(_bt.get("benchmark_lookback_days", 3000))
+        self._ohlcv_min_fetch = int(_bt.get("ohlcv_min_fetch_days", 2000))
+        self._mv_fetch_days = int(_bt.get("market_value_fetch_days", 2500))
+        self._inst_fallback_days = int(_bt.get("institutional_fallback_days", 500))
+        self._error_rate_threshold = float(_bt.get("error_rate_threshold", 0.2))
+        self._factor_coverage_threshold = float(_bt.get("factor_coverage_threshold", 0.3))
 
     def run(
         self,
@@ -290,10 +302,13 @@ class BacktestEngine:
             self._source,
             backtest_start=start_date,
             reference_now=reference_now,
+            ohlcv_min_fetch_days=self._ohlcv_min_fetch,
+            market_value_fetch_days=self._mv_fetch_days,
+            institutional_fallback_days=self._inst_fallback_days,
         )
 
         # 取 benchmark 交易日索引，用於對齊 rebalance 日期到真實交易日
-        _bench_for_dates = self._source.fetch_ohlcv(benchmark_symbol, "D", 3000)
+        _bench_for_dates = self._source.fetch_ohlcv(benchmark_symbol, "D", self._benchmark_lookback)
         _trading_days = _bench_for_dates.index if _bench_for_dates is not None and not _bench_for_dates.empty else None
         rebalance_dates = self._generate_rebalance_dates(
             start_date, end_date, rebalance_day, trading_days=_trading_days
@@ -312,7 +327,7 @@ class BacktestEngine:
         hist_universe.load()
 
         # --- 取得 benchmark 日線報酬（含 stock split 自動調整）---
-        bench_df = self._source.fetch_ohlcv(benchmark_symbol, "D", 3000)
+        bench_df = self._source.fetch_ohlcv(benchmark_symbol, "D", self._benchmark_lookback)
         benchmark_daily: pd.Series | None = None
         if bench_df is not None and not bench_df.empty:
             adjusted_close = adjust_splits(bench_df["close"])
@@ -455,9 +470,9 @@ class BacktestEngine:
             else:
                 factor_coverage = {"revenue_momentum": 0.0, "institutional_flow": 0.0}
 
-            # data_degraded 判定：錯誤率 > 20% 或 **使用中的**因子覆蓋率 < 30%
+            # data_degraded 判定：錯誤率超過閾值 或 使用中的因子覆蓋率低於閾值
             # 只檢查權重 > 0 的因子，避免已停用因子（如 IF=0%）觸發 false alarm
-            error_degraded = n_errors > n_analyzed * 0.2
+            error_degraded = n_errors > n_analyzed * self._error_rate_threshold
             score_weights = self._portfolio_config.get("score_weights", {})
             coverage_factor_map = {
                 "revenue_momentum": "revenue_momentum",
@@ -467,10 +482,14 @@ class BacktestEngine:
             if eligible_analyses:
                 for factor_name, coverage_key in coverage_factor_map.items():
                     weight = float(score_weights.get(factor_name, 0))
-                    if weight > 0 and factor_coverage.get(coverage_key, 0) < 0.3:
+                    if weight > 0 and factor_coverage.get(coverage_key, 0) < self._factor_coverage_threshold:
                         coverage_degraded = True
                         break
             data_degraded = error_degraded or coverage_degraded
+
+            # universe fingerprint：用於偵測不同執行間的資料漂移
+            _universe_syms = sorted(s["symbol"] for s in universe)
+            _universe_fp = hashlib.md5(",".join(_universe_syms).encode()).hexdigest()[:12]
 
             # 保存 snapshot
             snapshot = {
@@ -481,6 +500,8 @@ class BacktestEngine:
                 "analysis_errors": n_errors,
                 "eligible_candidates": n_eligible,
                 "selected_count": len(selection["positions"]),
+                "universe_size": len(universe),
+                "universe_fingerprint": _universe_fp,
                 "one_way_turnover": round(turnover, 4),
                 "trade_cost": round(total_trade_cost, 6),
                 "data_degraded": data_degraded,
@@ -490,7 +511,7 @@ class BacktestEngine:
                         f"factor_coverage_low:{k}"
                         for k, v in coverage_factor_map.items()
                         if float(score_weights.get(k, 0)) > 0
-                        and factor_coverage.get(v, 0) < 0.3
+                        and factor_coverage.get(v, 0) < self._factor_coverage_threshold
                     ] if coverage_degraded else [])
                 ),
                 "factor_coverage": factor_coverage,
@@ -602,7 +623,7 @@ class BacktestEngine:
         for symbol, weight in holdings.items():
             if weight <= 0:
                 continue
-            df = slicer.fetch_ohlcv(symbol, "D", 2000)
+            df = slicer.fetch_ohlcv(symbol, "D", self._ohlcv_min_fetch)
             if df is None or df.empty:
                 continue
 
