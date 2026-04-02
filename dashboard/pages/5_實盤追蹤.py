@@ -31,7 +31,7 @@ trades = _load(TRADES_FILE)
 performance = _load(PERFORMANCE_FILE)
 
 if not portfolio and not trades:
-    st.info("尚未開始投資。4/14 開始的話，按照以下步驟：")
+    st.info("尚未開始投資。4/13（週一）開始的話，按照以下步驟：")
     st.markdown("""
     ```bash
     # 1. 取得本月建議

@@ -462,6 +462,10 @@ class BacktestEngine:
                         sum(1 for a in eligible_analyses if a.get("revenue_raw") is not None)
                         / len(eligible_analyses), 3
                     ),
+                    # NOTE: 以「非零值」近似 coverage。institutional_raw=0 可能代表
+                    # 「真正零流量」或「未 fetch（IF weight=0 時）」，兩者無法區分。
+                    # 目前 IF weight=0，此值僅供診斷記錄，不影響 degraded 判定。
+                    # 若未來重啟 IF，應改用 None 判斷（missing-aware）。
                     "institutional_flow": round(
                         sum(1 for a in eligible_analyses if (a.get("institutional_raw") or 0) != 0)
                         / len(eligible_analyses), 3

@@ -447,13 +447,13 @@ class FinMindSource(DataSource):
                 logger.warning("Stock info dataset unavailable with current FinMind access")
             else:
                 logger.warning("Failed to fetch stock info: %s", exc)
-            return cached or self._load_stock_info_csv_fallback()
+            return cached if (cached is not None and not cached.empty) else self._load_stock_info_csv_fallback()
         except Exception as exc:
             logger.warning("Failed to fetch stock info: %s", exc)
-            return cached or self._load_stock_info_csv_fallback()
+            return cached if (cached is not None and not cached.empty) else self._load_stock_info_csv_fallback()
 
         if df is None or df.empty:
-            return cached or self._load_stock_info_csv_fallback()
+            return cached if (cached is not None and not cached.empty) else self._load_stock_info_csv_fallback()
 
         result = df.copy()
         self._disk.save("stock_info", result)
