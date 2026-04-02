@@ -13,6 +13,9 @@ import logging
 from datetime import datetime, timedelta
 
 import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,7 @@ def fetch_twse_turnover(as_of: datetime) -> dict[str, float]:
                 params={"date": date_str, "response": "json"},
                 timeout=_REQUEST_TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
             )
             if resp.status_code != 200:
                 logger.debug("TWSE STOCK_DAY_ALL HTTP %d for date %s", resp.status_code, date_str)
@@ -107,6 +111,7 @@ def fetch_tpex_turnover(as_of: datetime) -> dict[str, float]:
                 params={"date": date_str, "response": "json"},
                 timeout=_REQUEST_TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
             )
             if resp.status_code != 200:
                 logger.debug("TPEX dailySummary HTTP %d for date %s", resp.status_code, date_str)

@@ -1,554 +1,5 @@
 [
   {
-    "rebalance_date": "2024-06-12T00:00:00",
-    "market_signal": "risk_on",
-    "gross_exposure": 0.96,
-    "total_analyzed": 80,
-    "analysis_errors": 0,
-    "eligible_candidates": 38,
-    "selected_count": 8,
-    "universe_size": 80,
-    "universe_fingerprint": "f5ddd52d2672",
-    "one_way_turnover": 0.48,
-    "trade_cost": 0.002736,
-    "data_degraded": false,
-    "data_degraded_reasons": [],
-    "factor_coverage": {
-      "revenue_momentum": 0.974,
-      "institutional_flow": 0.0
-    },
-    "eligible_list": [
-      "6442",
-      "3030",
-      "2383",
-      "2467",
-      "2367",
-      "2330",
-      "3450",
-      "8210",
-      "2317",
-      "3017",
-      "4967",
-      "2454",
-      "2382",
-      "8996",
-      "1582",
-      "6669",
-      "3533",
-      "3653",
-      "2891",
-      "2357",
-      "8039",
-      "6515",
-      "6257",
-      "6919",
-      "2360",
-      "2345",
-      "6285",
-      "6213",
-      "2327",
-      "8028",
-      "4958",
-      "3711",
-      "3665",
-      "4906",
-      "2303",
-      "2308",
-      "5243",
-      "3062"
-    ],
-    "rejected_not_selected": [
-      "2317",
-      "3017",
-      "4967",
-      "2454",
-      "2382",
-      "8996",
-      "1582",
-      "6669",
-      "3533",
-      "3653",
-      "2891",
-      "2357",
-      "8039",
-      "6515",
-      "6257",
-      "6919",
-      "2360",
-      "2345",
-      "6285",
-      "6213",
-      "2327",
-      "8028",
-      "4958",
-      "3711",
-      "3665",
-      "4906",
-      "2303",
-      "2308",
-      "5243",
-      "3062"
-    ],
-    "rejected_by_top_n": [
-      "2317",
-      "3017",
-      "4967",
-      "2454",
-      "2382",
-      "8996",
-      "1582",
-      "6669",
-      "3533",
-      "3653",
-      "2891",
-      "2357",
-      "8039",
-      "6515",
-      "6257",
-      "6919",
-      "2360",
-      "2345",
-      "6285",
-      "6213",
-      "2327",
-      "8028",
-      "4958",
-      "3711",
-      "3665",
-      "4906",
-      "2303",
-      "2308",
-      "5243",
-      "3062"
-    ],
-    "rejected_by_turnover": [
-      "3167",
-      "8021",
-      "6830",
-      "1304",
-      "1309"
-    ],
-    "rejected_by_price": [
-      "2409",
-      "3481",
-      "1802",
-      "2489",
-      "2887",
-      "1304",
-      "1309"
-    ],
-    "rejected_by_history": [
-      "7769",
-      "7822"
-    ],
-    "rejected_by_trend": [
-      "2313",
-      "8046",
-      "3037",
-      "2408",
-      "2344",
-      "2409",
-      "2368",
-      "6770",
-      "2455",
-      "2449",
-      "3481",
-      "3661",
-      "3715",
-      "3167",
-      "1303",
-      "3443",
-      "2337",
-      "2481",
-      "6805",
-      "6830",
-      "3189",
-      "6239",
-      "1802",
-      "2355",
-      "3714",
-      "2027",
-      "2404",
-      "1717",
-      "3231",
-      "2059",
-      "1519",
-      "3563",
-      "3036",
-      "6443",
-      "1304",
-      "1309",
-      "6139"
-    ],
-    "rejected_by_industry": [],
-    "positions": [
-      {
-        "symbol": "6442",
-        "weight": 0.12,
-        "score": 97.71,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "3030",
-        "weight": 0.12,
-        "score": 92.89,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2383",
-        "weight": 0.12,
-        "score": 76.77,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2467",
-        "weight": 0.12,
-        "score": 76.17,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2367",
-        "weight": 0.12,
-        "score": 75.68,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2330",
-        "weight": 0.12,
-        "score": 69.65,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "3450",
-        "weight": 0.12,
-        "score": 69.3,
-        "industry": "半導體業"
-      },
-      {
-        "symbol": "8210",
-        "weight": 0.12,
-        "score": 69.21,
-        "industry": "電腦及週邊設備業"
-      }
-    ],
-    "theme_concentration": {
-      "tech_weight": 0.96,
-      "tech_count": 8,
-      "total_positions": 8,
-      "top_industry": "電子工業",
-      "top_industry_weight": 0.36,
-      "industries": {
-        "電子工業": 0.36,
-        "電子零組件業": 0.36,
-        "半導體業": 0.12,
-        "電腦及週邊設備業": 0.12
-      }
-    },
-    "factor_detail": [
-      {
-        "symbol": "6442",
-        "rank": 1,
-        "portfolio_score": 97.71,
-        "rank_components": {
-          "price_momentum": 100.0,
-          "trend_quality": 98.68,
-          "revenue_momentum": 91.89
-        },
-        "price_momentum_raw": 2.1333062036160633,
-        "trend_quality_raw": 1.0,
-        "revenue_raw": 0.6600522390593208,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "3030",
-        "rank": 2,
-        "portfolio_score": 92.89,
-        "rank_components": {
-          "price_momentum": 94.74,
-          "trend_quality": 78.95,
-          "revenue_momentum": 100.0
-        },
-        "price_momentum_raw": 1.3058672014406154,
-        "trend_quality_raw": 0.7827,
-        "revenue_raw": 1.021883813109151,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2383",
-        "rank": 3,
-        "portfolio_score": 76.77,
-        "rank_components": {
-          "price_momentum": 78.95,
-          "trend_quality": 55.26,
-          "revenue_momentum": 89.19
-        },
-        "price_momentum_raw": 0.7331809473372689,
-        "trend_quality_raw": 0.6197,
-        "revenue_raw": 0.5740212765004951,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2467",
-        "rank": 4,
-        "portfolio_score": 76.17,
-        "rank_components": {
-          "price_momentum": 89.47,
-          "trend_quality": 13.16,
-          "revenue_momentum": 97.3
-        },
-        "price_momentum_raw": 1.1984319992917558,
-        "trend_quality_raw": 0.3626,
-        "revenue_raw": 0.8839352742713276,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2367",
-        "rank": 5,
-        "portfolio_score": 75.68,
-        "rank_components": {
-          "price_momentum": 73.68,
-          "trend_quality": 71.05,
-          "revenue_momentum": 83.78
-        },
-        "price_momentum_raw": 0.6818799521506317,
-        "trend_quality_raw": 0.7565,
-        "revenue_raw": 0.37129698090375596,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2330",
-        "rank": 6,
-        "portfolio_score": 69.65,
-        "rank_components": {
-          "price_momentum": 60.53,
-          "trend_quality": 73.68,
-          "revenue_momentum": 86.49
-        },
-        "price_momentum_raw": 0.5228866430373822,
-        "trend_quality_raw": 0.7599,
-        "revenue_raw": 0.4244806765724614,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "3450",
-        "rank": 7,
-        "portfolio_score": 69.3,
-        "rank_components": {
-          "price_momentum": 63.16,
-          "trend_quality": 81.58,
-          "revenue_momentum": 72.97
-        },
-        "price_momentum_raw": 0.5808550403016701,
-        "trend_quality_raw": 0.7881,
-        "revenue_raw": 0.2829545398528642,
-        "institutional_raw": 0.0,
-        "industry": "半導體業"
-      },
-      {
-        "symbol": "8210",
-        "rank": 8,
-        "portfolio_score": 69.21,
-        "rank_components": {
-          "price_momentum": 92.11,
-          "trend_quality": 42.11,
-          "revenue_momentum": 40.54
-        },
-        "price_momentum_raw": 1.275307158119658,
-        "trend_quality_raw": 0.5201,
-        "revenue_raw": 0.10917786113464728,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "2317",
-        "rank": 9,
-        "portfolio_score": 66.02,
-        "rank_components": {
-          "price_momentum": 76.32,
-          "trend_quality": 76.32,
-          "revenue_momentum": 35.14
-        },
-        "price_momentum_raw": 0.7189217837826842,
-        "trend_quality_raw": 0.7647,
-        "revenue_raw": 0.07413980441448798,
-        "institutional_raw": 0.0,
-        "industry": "其他電子業"
-      },
-      {
-        "symbol": "3017",
-        "rank": 10,
-        "portfolio_score": 65.65,
-        "rank_components": {
-          "price_momentum": 97.37,
-          "trend_quality": 36.84,
-          "revenue_momentum": 18.92
-        },
-        "price_momentum_raw": 1.8056032856032858,
-        "trend_quality_raw": 0.4976,
-        "revenue_raw": 0.01775475865202629,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "4967",
-        "rank": 11,
-        "portfolio_score": 65.28,
-        "rank_components": {
-          "price_momentum": 81.58,
-          "trend_quality": 98.68,
-          "revenue_momentum": 2.7
-        },
-        "price_momentum_raw": 0.7665014357316727,
-        "trend_quality_raw": 1.0,
-        "revenue_raw": -0.21168657137110738,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2454",
-        "rank": 12,
-        "portfolio_score": 63.3,
-        "rank_components": {
-          "price_momentum": 55.26,
-          "trend_quality": 63.16,
-          "revenue_momentum": 81.08
-        },
-        "price_momentum_raw": 0.4482376576361539,
-        "trend_quality_raw": 0.6673,
-        "revenue_raw": 0.33714673180403376,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2382",
-        "rank": 13,
-        "portfolio_score": 62.33,
-        "rank_components": {
-          "price_momentum": 86.84,
-          "trend_quality": 5.26,
-          "revenue_momentum": 54.05
-        },
-        "price_momentum_raw": 1.1313252553841173,
-        "trend_quality_raw": 0.2713,
-        "revenue_raw": 0.19080703398519486,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "8996",
-        "rank": 14,
-        "portfolio_score": 61.5,
-        "rank_components": {
-          "price_momentum": 84.21,
-          "trend_quality": 65.79,
-          "revenue_momentum": 8.11
-        },
-        "price_momentum_raw": 0.9434811818611367,
-        "trend_quality_raw": 0.7141,
-        "revenue_raw": -0.12803943307132418,
-        "institutional_raw": 0.0,
-        "industry": "電機機械"
-      },
-      {
-        "symbol": "1582",
-        "rank": 15,
-        "portfolio_score": 60.73,
-        "rank_components": {
-          "price_momentum": 52.63,
-          "trend_quality": 94.74,
-          "revenue_momentum": 51.35
-        },
-        "price_momentum_raw": 0.43347798091952705,
-        "trend_quality_raw": 0.912,
-        "revenue_raw": 0.1679147589934904,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "6669",
-        "rank": 16,
-        "portfolio_score": 60.31,
-        "rank_components": {
-          "price_momentum": 68.42,
-          "trend_quality": 28.95,
-          "revenue_momentum": 67.57
-        },
-        "price_momentum_raw": 0.6550935409170386,
-        "trend_quality_raw": 0.4821,
-        "revenue_raw": 0.21958131647175527,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "3533",
-        "rank": 17,
-        "portfolio_score": 59.62,
-        "rank_components": {
-          "price_momentum": 65.79,
-          "trend_quality": 39.47,
-          "revenue_momentum": 62.16
-        },
-        "price_momentum_raw": 0.639721708655222,
-        "trend_quality_raw": 0.5045,
-        "revenue_raw": 0.21208620125517313,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "3653",
-        "rank": 18,
-        "portfolio_score": 56.88,
-        "rank_components": {
-          "price_momentum": 71.05,
-          "trend_quality": 31.58,
-          "revenue_momentum": 45.95
-        },
-        "price_momentum_raw": 0.6786477810497418,
-        "trend_quality_raw": 0.491,
-        "revenue_raw": 0.1463882756012164,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
-        "symbol": "2891",
-        "rank": 19,
-        "portfolio_score": 52.95,
-        "rank_components": {
-          "price_momentum": 57.89,
-          "trend_quality": 44.74,
-          "revenue_momentum": 48.65
-        },
-        "price_momentum_raw": 0.4493355410107026,
-        "trend_quality_raw": 0.55,
-        "revenue_raw": 0.16052448431813712,
-        "institutional_raw": 0.0,
-        "industry": "金融保險"
-      },
-      {
-        "symbol": "2357",
-        "rank": 20,
-        "portfolio_score": 51.91,
-        "rank_components": {
-          "price_momentum": 50.0,
-          "trend_quality": 34.21,
-          "revenue_momentum": 70.27
-        },
-        "price_momentum_raw": 0.3861247914543729,
-        "trend_quality_raw": 0.492,
-        "revenue_raw": 0.2586990066749995,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      }
-    ],
-    "config_hash": "4e8e8d73eddfbefd"
-  },
-  {
     "rebalance_date": "2024-07-12T00:00:00",
     "market_signal": "risk_on",
     "gross_exposure": 0.96,
@@ -558,8 +9,8 @@
     "selected_count": 8,
     "universe_size": 80,
     "universe_fingerprint": "f5ddd52d2672",
-    "one_way_turnover": 0.36,
-    "trade_cost": 0.002052,
+    "one_way_turnover": 0.48,
+    "trade_cost": 0.002736,
     "data_degraded": false,
     "data_degraded_reasons": [],
     "factor_coverage": {
@@ -616,9 +67,9 @@
       "6443"
     ],
     "rejected_not_selected": [
-      "2489",
+      "3030",
       "2059",
-      "3653",
+      "2367",
       "2383",
       "2317",
       "2330",
@@ -658,7 +109,7 @@
     ],
     "rejected_by_top_n": [
       "2059",
-      "3653",
+      "2367",
       "2383",
       "2317",
       "2330",
@@ -773,9 +224,9 @@
         "industry": "電子工業"
       },
       {
-        "symbol": "3030",
+        "symbol": "2489",
         "weight": 0.12,
-        "score": 74.61,
+        "score": 76.33,
         "industry": "電子工業"
       },
       {
@@ -785,9 +236,9 @@
         "industry": "電腦及週邊設備業"
       },
       {
-        "symbol": "2367",
+        "symbol": "3653",
         "weight": 0.12,
-        "score": 68.3,
+        "score": 69.18,
         "industry": "電子零組件業"
       }
     ],
@@ -1112,422 +563,296 @@
   {
     "rebalance_date": "2024-08-12T00:00:00",
     "market_signal": "risk_off",
-    "gross_exposure": 0.3499,
+    "gross_exposure": 0.3501,
     "total_analyzed": 80,
     "analysis_errors": 0,
-    "eligible_candidates": 56,
+    "eligible_candidates": 52,
     "selected_count": 8,
     "universe_size": 80,
-    "universe_fingerprint": "f5ddd52d2672",
-    "one_way_turnover": 0.4683,
-    "trade_cost": 0.00267,
+    "universe_fingerprint": "4c621e55a17c",
+    "one_way_turnover": 0.6551,
+    "trade_cost": 0.003734,
     "data_degraded": false,
     "data_degraded_reasons": [],
     "factor_coverage": {
-      "revenue_momentum": 0.982,
+      "revenue_momentum": 1.0,
       "institutional_flow": 0.0
     },
     "eligible_list": [
-      "6442",
-      "2467",
-      "3450",
-      "6139",
-      "3030",
-      "3167",
-      "6919",
-      "2489",
-      "8028",
+      "6449",
       "2330",
-      "3653",
       "2383",
-      "4967",
-      "2449",
-      "2317",
+      "3019",
       "3533",
-      "3017",
-      "8210",
-      "6805",
+      "2317",
       "2367",
-      "2059",
-      "2382",
-      "3062",
-      "3665",
+      "3413",
       "2327",
-      "1582",
-      "4958",
+      "3008",
+      "3665",
+      "2405",
       "2313",
-      "2357",
-      "2368",
+      "6176",
+      "2359",
+      "1536",
       "2454",
-      "4906",
-      "8021",
-      "2345",
-      "6515",
+      "3702",
+      "2881",
       "2360",
+      "3406",
+      "2345",
+      "2439",
+      "3673",
       "2308",
+      "3645",
+      "2882",
       "2455",
-      "8039",
-      "3189",
-      "2404",
-      "2891",
-      "3563",
+      "1216",
       "2303",
-      "3711",
+      "2891",
+      "2458",
+      "3045",
+      "2474",
       "3231",
-      "2355",
-      "6257",
+      "2912",
+      "4938",
+      "4915",
+      "2492",
+      "2356",
+      "2375",
       "2337",
-      "1717",
-      "5243",
-      "6830",
+      "2412",
+      "6153",
+      "1605",
+      "2371",
+      "3059",
       "3037",
-      "3714",
-      "2027",
-      "6443"
+      "1707",
+      "2049",
+      "6269",
+      "6456"
     ],
     "rejected_not_selected": [
-      "8028",
-      "2330",
-      "3653",
-      "2383",
-      "4967",
-      "2449",
-      "2317",
-      "3533",
-      "3017",
-      "8210",
-      "6805",
       "2367",
-      "2059",
-      "2382",
-      "3062",
-      "3665",
       "2327",
-      "1582",
-      "4958",
+      "3665",
+      "2405",
       "2313",
-      "2357",
-      "2368",
+      "6176",
+      "2359",
+      "1536",
       "2454",
-      "4906",
-      "8021",
-      "2345",
-      "6515",
+      "3702",
+      "2881",
       "2360",
+      "3406",
+      "2345",
+      "2439",
+      "3673",
       "2308",
+      "3645",
+      "2882",
       "2455",
-      "8039",
-      "3189",
-      "2404",
-      "2891",
-      "3563",
+      "1216",
       "2303",
-      "3711",
+      "2891",
+      "2458",
+      "3045",
+      "2474",
       "3231",
-      "2355",
-      "6257",
+      "2912",
+      "4938",
+      "4915",
+      "2492",
+      "2356",
+      "2375",
       "2337",
-      "1717",
-      "5243",
-      "6830",
+      "2412",
+      "6153",
+      "1605",
+      "2371",
+      "3059",
       "3037",
-      "3714",
-      "2027",
-      "6443"
+      "1707",
+      "2049",
+      "6269",
+      "6456"
     ],
     "rejected_by_top_n": [
-      "8028",
-      "2330",
-      "3653",
-      "2383",
-      "4967",
-      "2449",
-      "2317",
-      "3533",
-      "3017",
-      "8210",
-      "6805",
-      "2367",
-      "2059",
-      "2382",
-      "3062",
-      "3665",
       "2327",
-      "1582",
-      "4958",
+      "3665",
+      "2405",
       "2313",
-      "2357",
-      "2368",
+      "6176",
+      "2359",
+      "1536",
       "2454",
-      "4906",
-      "8021",
-      "2345",
-      "6515",
+      "3702",
+      "2881",
       "2360",
+      "3406",
+      "2345",
+      "2439",
+      "3673",
       "2308",
+      "3645",
+      "2882",
       "2455",
-      "8039",
-      "3189",
-      "2404",
-      "2891",
-      "3563",
+      "1216",
       "2303",
-      "3711",
+      "2891",
+      "2458",
+      "3045",
+      "2474",
       "3231",
-      "2355",
-      "6257",
+      "2912",
+      "4938",
+      "4915",
+      "2492",
+      "2356",
+      "2375",
       "2337",
-      "1717",
-      "5243",
-      "6830",
+      "2412",
+      "6153",
+      "1605",
+      "2371",
+      "3059",
       "3037",
-      "3714",
-      "2027",
-      "6443"
+      "1707",
+      "2049",
+      "6269",
+      "6456"
     ],
-    "rejected_by_turnover": [],
+    "rejected_by_turnover": [
+      "3026",
+      "4943",
+      "4739",
+      "2104",
+      "1909",
+      "6283",
+      "1710",
+      "6120"
+    ],
     "rejected_by_price": [
-      "2409",
+      "4943",
+      "1314",
+      "2104",
+      "1909",
+      "2883",
+      "1710",
+      "2888",
       "3481",
-      "1802",
-      "2887",
-      "1304",
-      "1309"
+      "1312",
+      "6120",
+      "2409"
     ],
-    "rejected_by_history": [
-      "7769",
-      "7822"
-    ],
+    "rejected_by_history": [],
     "rejected_by_trend": [
-      "8046",
-      "2408",
-      "2344",
-      "2409",
-      "6213",
-      "6770",
-      "3661",
-      "3715",
-      "1303",
-      "6285",
-      "6669",
+      "2498",
+      "1326",
       "3443",
-      "8996",
-      "2481",
-      "6239",
-      "1519",
-      "3036",
-      "1304"
+      "5469",
+      "4739",
+      "1301",
+      "2376",
+      "1590",
+      "1303",
+      "2408",
+      "5871",
+      "2344",
+      "6505",
+      "6451",
+      "2409",
+      "2352"
     ],
     "rejected_by_industry": [],
     "positions": [
       {
-        "symbol": "6442",
-        "weight": 0.0507,
-        "score": 98.57,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2467",
-        "weight": 0.0492,
-        "score": 95.71,
+        "symbol": "6449",
+        "weight": 0.0489,
+        "score": 89.52,
         "industry": "電子零組件業"
       },
       {
-        "symbol": "3450",
-        "weight": 0.0463,
-        "score": 90.05,
-        "industry": "半導體業"
-      },
-      {
-        "symbol": "6139",
-        "weight": 0.0437,
-        "score": 85.01,
-        "industry": "其他電子業"
-      },
-      {
-        "symbol": "3030",
-        "weight": 0.0404,
-        "score": 78.6,
+        "symbol": "2330",
+        "weight": 0.0462,
+        "score": 84.52,
         "industry": "電子工業"
       },
       {
-        "symbol": "3167",
-        "weight": 0.0404,
-        "score": 78.47,
-        "industry": "電機機械"
+        "symbol": "2383",
+        "weight": 0.0458,
+        "score": 83.85,
+        "industry": "電子零組件業"
       },
       {
-        "symbol": "6919",
-        "weight": 0.0399,
-        "score": 77.59,
-        "industry": "化學生技醫療"
+        "symbol": "3019",
+        "weight": 0.0454,
+        "score": 83.17,
+        "industry": "光電業"
       },
       {
-        "symbol": "2489",
-        "weight": 0.0393,
-        "score": 76.48,
+        "symbol": "3533",
+        "weight": 0.0432,
+        "score": 79.13,
+        "industry": "電子零組件業"
+      },
+      {
+        "symbol": "2317",
+        "weight": 0.0413,
+        "score": 75.58,
+        "industry": "其他電子業"
+      },
+      {
+        "symbol": "3413",
+        "weight": 0.0401,
+        "score": 73.37,
+        "industry": "電子工業"
+      },
+      {
+        "symbol": "3008",
+        "weight": 0.0392,
+        "score": 71.83,
         "industry": "電子工業"
       }
     ],
     "theme_concentration": {
-      "tech_weight": 0.31,
-      "tech_count": 7,
+      "tech_weight": 0.3501,
+      "tech_count": 8,
       "total_positions": 8,
-      "top_industry": "電子工業",
-      "top_industry_weight": 0.1304,
+      "top_industry": "電子零組件業",
+      "top_industry_weight": 0.1379,
       "industries": {
-        "電子工業": 0.1304,
-        "電子零組件業": 0.0492,
-        "半導體業": 0.0463,
-        "其他電子業": 0.0437,
-        "電機機械": 0.0404,
-        "化學生技醫療": 0.0399
+        "電子零組件業": 0.1379,
+        "電子工業": 0.1255,
+        "光電業": 0.0454,
+        "其他電子業": 0.0413
       }
     },
     "factor_detail": [
       {
-        "symbol": "6442",
+        "symbol": "6449",
         "rank": 1,
-        "portfolio_score": 98.57,
+        "portfolio_score": 89.52,
         "rank_components": {
-          "price_momentum": 100.0,
-          "trend_quality": 92.86,
-          "revenue_momentum": 100.0
+          "price_momentum": 98.08,
+          "trend_quality": 86.54,
+          "revenue_momentum": 73.08
         },
-        "price_momentum_raw": 4.712276931885113,
-        "trend_quality_raw": 0.6031,
-        "revenue_raw": 1.0794492918280847,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2467",
-        "rank": 2,
-        "portfolio_score": 95.71,
-        "rank_components": {
-          "price_momentum": 98.21,
-          "trend_quality": 85.71,
-          "revenue_momentum": 98.18
-        },
-        "price_momentum_raw": 1.903201432831435,
-        "trend_quality_raw": 0.4525,
-        "revenue_raw": 0.9282870889979614,
+        "price_momentum_raw": 1.3794010973082924,
+        "trend_quality_raw": 0.35,
+        "revenue_raw": 0.18495534987938364,
         "institutional_raw": 0.0,
         "industry": "電子零組件業"
       },
       {
-        "symbol": "3450",
-        "rank": 3,
-        "portfolio_score": 90.05,
-        "rank_components": {
-          "price_momentum": 96.43,
-          "trend_quality": 96.43,
-          "revenue_momentum": 70.91
-        },
-        "price_momentum_raw": 1.8012448257284286,
-        "trend_quality_raw": 0.6288,
-        "revenue_raw": 0.25143972996128167,
-        "institutional_raw": 0.0,
-        "industry": "半導體業"
-      },
-      {
-        "symbol": "6139",
-        "rank": 4,
-        "portfolio_score": 85.01,
-        "rank_components": {
-          "price_momentum": 94.64,
-          "trend_quality": 62.5,
-          "revenue_momentum": 81.82
-        },
-        "price_momentum_raw": 1.597743648198698,
-        "trend_quality_raw": 0.2328,
-        "revenue_raw": 0.40188436403565503,
-        "institutional_raw": 0.0,
-        "industry": "其他電子業"
-      },
-      {
-        "symbol": "3030",
-        "rank": 5,
-        "portfolio_score": 78.6,
-        "rank_components": {
-          "price_momentum": 92.86,
-          "trend_quality": 28.57,
-          "revenue_momentum": 87.27
-        },
-        "price_momentum_raw": 1.1646985051342438,
-        "trend_quality_raw": 0.0151,
-        "revenue_raw": 0.5094845012522734,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "3167",
-        "rank": 6,
-        "portfolio_score": 78.47,
-        "rank_components": {
-          "price_momentum": 62.5,
-          "trend_quality": 100.0,
-          "revenue_momentum": 96.36
-        },
-        "price_momentum_raw": 0.525338428586036,
-        "trend_quality_raw": 0.778,
-        "revenue_raw": 0.8283612324171089,
-        "institutional_raw": 0.0,
-        "industry": "電機機械"
-      },
-      {
-        "symbol": "6919",
-        "rank": 7,
-        "portfolio_score": 77.59,
-        "rank_components": {
-          "price_momentum": 83.93,
-          "trend_quality": 94.64,
-          "revenue_momentum": 50.0
-        },
-        "price_momentum_raw": 0.8158037582136175,
-        "trend_quality_raw": 0.6068,
-        "revenue_raw": null,
-        "institutional_raw": 0.0,
-        "industry": "化學生技醫療"
-      },
-      {
-        "symbol": "2489",
-        "rank": 8,
-        "portfolio_score": 76.48,
-        "rank_components": {
-          "price_momentum": 67.86,
-          "trend_quality": 82.14,
-          "revenue_momentum": 90.91
-        },
-        "price_momentum_raw": 0.5520598621838024,
-        "trend_quality_raw": 0.4358,
-        "revenue_raw": 0.5932768018608346,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "8028",
-        "rank": 9,
-        "portfolio_score": 72.39,
-        "rank_components": {
-          "price_momentum": 89.29,
-          "trend_quality": 98.21,
-          "revenue_momentum": 14.55
-        },
-        "price_momentum_raw": 1.1301506144521365,
-        "trend_quality_raw": 0.7447,
-        "revenue_raw": -0.0022547950147182166,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
         "symbol": "2330",
-        "rank": 10,
-        "portfolio_score": 69.7,
+        "rank": 2,
+        "portfolio_score": 84.52,
         "rank_components": {
-          "price_momentum": 69.64,
-          "trend_quality": 66.07,
-          "revenue_momentum": 72.73
+          "price_momentum": 88.46,
+          "trend_quality": 71.15,
+          "revenue_momentum": 86.54
         },
         "price_momentum_raw": 0.5628106427422491,
         "trend_quality_raw": 0.2411,
@@ -1536,28 +861,13 @@
         "industry": "電子工業"
       },
       {
-        "symbol": "3653",
-        "rank": 11,
-        "portfolio_score": 68.64,
-        "rank_components": {
-          "price_momentum": 78.57,
-          "trend_quality": 58.93,
-          "revenue_momentum": 54.55
-        },
-        "price_momentum_raw": 0.6946357096567928,
-        "trend_quality_raw": 0.221,
-        "revenue_raw": 0.15499167332535793,
-        "institutional_raw": 0.0,
-        "industry": "電子零組件業"
-      },
-      {
         "symbol": "2383",
-        "rank": 12,
-        "portfolio_score": 68.42,
+        "rank": 3,
+        "portfolio_score": 83.85,
         "rank_components": {
-          "price_momentum": 66.07,
-          "trend_quality": 53.57,
-          "revenue_momentum": 85.45
+          "price_momentum": 84.62,
+          "trend_quality": 61.54,
+          "revenue_momentum": 100.0
         },
         "price_momentum_raw": 0.5473811687875139,
         "trend_quality_raw": 0.1748,
@@ -1566,58 +876,28 @@
         "industry": "電子零組件業"
       },
       {
-        "symbol": "4967",
-        "rank": 13,
-        "portfolio_score": 67.74,
+        "symbol": "3019",
+        "rank": 4,
+        "portfolio_score": 83.17,
         "rank_components": {
-          "price_momentum": 76.79,
-          "trend_quality": 11.61,
-          "revenue_momentum": 92.73
+          "price_momentum": 71.15,
+          "trend_quality": 100.0,
+          "revenue_momentum": 96.15
         },
-        "price_momentum_raw": 0.6458128654970761,
-        "trend_quality_raw": 0.0,
-        "revenue_raw": 0.7926547617891209,
+        "price_momentum_raw": 0.36484484120593197,
+        "trend_quality_raw": 0.8362,
+        "revenue_raw": 0.37313596307966534,
         "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2449",
-        "rank": 14,
-        "portfolio_score": 65.91,
-        "rank_components": {
-          "price_momentum": 85.71,
-          "trend_quality": 89.29,
-          "revenue_momentum": 3.64
-        },
-        "price_momentum_raw": 0.8476374558779592,
-        "trend_quality_raw": 0.5397,
-        "revenue_raw": -0.19923426052051138,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
-      },
-      {
-        "symbol": "2317",
-        "rank": 15,
-        "portfolio_score": 65.07,
-        "rank_components": {
-          "price_momentum": 80.36,
-          "trend_quality": 33.93,
-          "revenue_momentum": 56.36
-        },
-        "price_momentum_raw": 0.6986894740628823,
-        "trend_quality_raw": 0.0267,
-        "revenue_raw": 0.16460727620266122,
-        "institutional_raw": 0.0,
-        "industry": "其他電子業"
+        "industry": "光電業"
       },
       {
         "symbol": "3533",
-        "rank": 16,
-        "portfolio_score": 64.1,
+        "rank": 5,
+        "portfolio_score": 79.13,
         "rank_components": {
-          "price_momentum": 73.21,
-          "trend_quality": 46.43,
-          "revenue_momentum": 58.18
+          "price_momentum": 92.31,
+          "trend_quality": 48.08,
+          "revenue_momentum": 75.0
         },
         "price_momentum_raw": 0.5981942277164184,
         "trend_quality_raw": 0.1122,
@@ -1626,64 +906,229 @@
         "industry": "電子零組件業"
       },
       {
-        "symbol": "3017",
-        "rank": 17,
-        "portfolio_score": 63.63,
+        "symbol": "2317",
+        "rank": 6,
+        "portfolio_score": 75.58,
         "rank_components": {
-          "price_momentum": 87.5,
-          "trend_quality": 11.61,
-          "revenue_momentum": 52.73
+          "price_momentum": 94.23,
+          "trend_quality": 34.62,
+          "revenue_momentum": 67.31
         },
-        "price_momentum_raw": 1.0330683344025056,
-        "trend_quality_raw": 0.0,
-        "revenue_raw": 0.1535576113422983,
+        "price_momentum_raw": 0.6986894740628823,
+        "trend_quality_raw": 0.0267,
+        "revenue_raw": 0.16460727620266122,
         "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "8210",
-        "rank": 18,
-        "portfolio_score": 63.34,
-        "rank_components": {
-          "price_momentum": 57.14,
-          "trend_quality": 48.21,
-          "revenue_momentum": 89.09
-        },
-        "price_momentum_raw": 0.4292280544359788,
-        "trend_quality_raw": 0.1218,
-        "revenue_raw": 0.5116653227543305,
-        "institutional_raw": 0.0,
-        "industry": "電腦及週邊設備業"
-      },
-      {
-        "symbol": "6805",
-        "rank": 19,
-        "portfolio_score": 63.11,
-        "rank_components": {
-          "price_momentum": 91.07,
-          "trend_quality": 44.64,
-          "revenue_momentum": 16.36
-        },
-        "price_momentum_raw": 1.147571465823743,
-        "trend_quality_raw": 0.1051,
-        "revenue_raw": 0.0047435085830325185,
-        "institutional_raw": 0.0,
-        "industry": "電子工業"
+        "industry": "其他電子業"
       },
       {
         "symbol": "2367",
-        "rank": 20,
-        "portfolio_score": 62.95,
+        "rank": 7,
+        "portfolio_score": 74.42,
         "rank_components": {
-          "price_momentum": 82.14,
-          "trend_quality": 11.61,
-          "revenue_momentum": 61.82
+          "price_momentum": 96.15,
+          "trend_quality": 11.54,
+          "revenue_momentum": 76.92
         },
         "price_momentum_raw": 0.8071339005273426,
         "trend_quality_raw": 0.0,
         "revenue_raw": 0.20640295468285846,
         "institutional_raw": 0.0,
         "industry": "電子零組件業"
+      },
+      {
+        "symbol": "3413",
+        "rank": 8,
+        "portfolio_score": 73.37,
+        "rank_components": {
+          "price_momentum": 86.54,
+          "trend_quality": 42.31,
+          "revenue_momentum": 69.23
+        },
+        "price_momentum_raw": 0.5613371675053919,
+        "trend_quality_raw": 0.0491,
+        "revenue_raw": 0.1762879495712546,
+        "institutional_raw": 0.0,
+        "industry": "電子工業"
+      },
+      {
+        "symbol": "2327",
+        "rank": 9,
+        "portfolio_score": 72.31,
+        "rank_components": {
+          "price_momentum": 75.0,
+          "trend_quality": 80.77,
+          "revenue_momentum": 59.62
+        },
+        "price_momentum_raw": 0.38517862136734377,
+        "trend_quality_raw": 0.3024,
+        "revenue_raw": 0.12883051869982967,
+        "institutional_raw": 0.0,
+        "industry": "電子零組件業"
+      },
+      {
+        "symbol": "3008",
+        "rank": 10,
+        "portfolio_score": 71.83,
+        "rank_components": {
+          "price_momentum": 55.77,
+          "trend_quality": 90.38,
+          "revenue_momentum": 92.31
+        },
+        "price_momentum_raw": 0.2833634429675318,
+        "trend_quality_raw": 0.3973,
+        "revenue_raw": 0.340707926981352,
+        "institutional_raw": 0.0,
+        "industry": "電子工業"
+      },
+      {
+        "symbol": "3665",
+        "rank": 11,
+        "portfolio_score": 71.73,
+        "rank_components": {
+          "price_momentum": 80.77,
+          "trend_quality": 98.08,
+          "revenue_momentum": 30.77
+        },
+        "price_momentum_raw": 0.44755458125061015,
+        "trend_quality_raw": 0.602,
+        "revenue_raw": 0.01695969085066674,
+        "institutional_raw": 0.0,
+        "industry": "其他電子業"
+      },
+      {
+        "symbol": "2405",
+        "rank": 12,
+        "portfolio_score": 69.71,
+        "rank_components": {
+          "price_momentum": 82.69,
+          "trend_quality": 73.08,
+          "revenue_momentum": 38.46
+        },
+        "price_momentum_raw": 0.46900590363740235,
+        "trend_quality_raw": 0.2449,
+        "revenue_raw": 0.04318823359604117,
+        "institutional_raw": 0.0,
+        "industry": "電腦及週邊設備業"
+      },
+      {
+        "symbol": "2313",
+        "rank": 13,
+        "portfolio_score": 68.94,
+        "rank_components": {
+          "price_momentum": 78.85,
+          "trend_quality": 46.15,
+          "revenue_momentum": 65.38
+        },
+        "price_momentum_raw": 0.40662607541802537,
+        "trend_quality_raw": 0.0943,
+        "revenue_raw": 0.1528336658776394,
+        "institutional_raw": 0.0,
+        "industry": "電子零組件業"
+      },
+      {
+        "symbol": "6176",
+        "rank": 14,
+        "portfolio_score": 67.4,
+        "rank_components": {
+          "price_momentum": 76.92,
+          "trend_quality": 55.77,
+          "revenue_momentum": 55.77
+        },
+        "price_momentum_raw": 0.4018550368550368,
+        "trend_quality_raw": 0.1329,
+        "revenue_raw": 0.1256523528349573,
+        "institutional_raw": 0.0,
+        "industry": "光電業"
+      },
+      {
+        "symbol": "2359",
+        "rank": 15,
+        "portfolio_score": 67.02,
+        "rank_components": {
+          "price_momentum": 100.0,
+          "trend_quality": 57.69,
+          "revenue_momentum": 1.92
+        },
+        "price_momentum_raw": 2.8788187764524817,
+        "trend_quality_raw": 0.1456,
+        "revenue_raw": -0.356070168266125,
+        "institutional_raw": 0.0,
+        "industry": "電子工業"
+      },
+      {
+        "symbol": "1536",
+        "rank": 16,
+        "portfolio_score": 65.67,
+        "rank_components": {
+          "price_momentum": 42.31,
+          "trend_quality": 94.23,
+          "revenue_momentum": 94.23
+        },
+        "price_momentum_raw": 0.11866275642960855,
+        "trend_quality_raw": 0.4501,
+        "revenue_raw": 0.3476269209500233,
+        "institutional_raw": 0.0,
+        "industry": "汽車工業"
+      },
+      {
+        "symbol": "2454",
+        "rank": 17,
+        "portfolio_score": 65.0,
+        "rank_components": {
+          "price_momentum": 90.38,
+          "trend_quality": 11.54,
+          "revenue_momentum": 51.92
+        },
+        "price_momentum_raw": 0.5808464321049454,
+        "trend_quality_raw": 0.0,
+        "revenue_raw": 0.07534965325753541,
+        "institutional_raw": 0.0,
+        "industry": "電子工業"
+      },
+      {
+        "symbol": "3702",
+        "rank": 18,
+        "portfolio_score": 63.65,
+        "rank_components": {
+          "price_momentum": 57.69,
+          "trend_quality": 53.85,
+          "revenue_momentum": 84.62
+        },
+        "price_momentum_raw": 0.2874497005682247,
+        "trend_quality_raw": 0.1323,
+        "revenue_raw": 0.2554327016621264,
+        "institutional_raw": 0.0,
+        "industry": "電子通路業"
+      },
+      {
+        "symbol": "2881",
+        "rank": 19,
+        "portfolio_score": 63.08,
+        "rank_components": {
+          "price_momentum": 69.23,
+          "trend_quality": 96.15,
+          "revenue_momentum": 23.08
+        },
+        "price_momentum_raw": 0.3646881937246159,
+        "trend_quality_raw": 0.5117,
+        "revenue_raw": 0.0005233594382478054,
+        "institutional_raw": 0.0,
+        "industry": "金融保險"
+      },
+      {
+        "symbol": "2360",
+        "rank": 20,
+        "portfolio_score": 62.98,
+        "rank_components": {
+          "price_momentum": 63.46,
+          "trend_quality": 63.46,
+          "revenue_momentum": 61.54
+        },
+        "price_momentum_raw": 0.3346711378075643,
+        "trend_quality_raw": 0.1772,
+        "revenue_raw": 0.1331783762420258,
+        "institutional_raw": 0.0,
+        "industry": "電子工業"
       }
     ],
     "config_hash": "4e8e8d73eddfbefd"
@@ -1691,15 +1136,15 @@
   {
     "rebalance_date": "2024-09-12T00:00:00",
     "market_signal": "risk_off",
-    "gross_exposure": 0.35,
+    "gross_exposure": 0.3501,
     "total_analyzed": 80,
     "analysis_errors": 0,
     "eligible_candidates": 50,
-    "selected_count": 7,
+    "selected_count": 8,
     "universe_size": 80,
     "universe_fingerprint": "f5ddd52d2672",
-    "one_way_turnover": 0.0818,
-    "trade_cost": 0.000466,
+    "one_way_turnover": 0.3501,
+    "trade_cost": 0.001996,
     "data_degraded": false,
     "data_degraded_reasons": [],
     "factor_coverage": {
@@ -1761,7 +1206,6 @@
     "rejected_not_selected": [
       "6805",
       "8028",
-      "3653",
       "8039",
       "1582",
       "2489",
@@ -1804,7 +1248,6 @@
       "2027"
     ],
     "rejected_by_top_n": [
-      "3653",
       "8039",
       "1582",
       "2489",
@@ -1892,59 +1335,65 @@
     "positions": [
       {
         "symbol": "2467",
-        "weight": 0.054,
+        "weight": 0.0482,
         "score": 92.31,
         "industry": "電子零組件業"
       },
       {
         "symbol": "3450",
-        "weight": 0.0539,
+        "weight": 0.0482,
         "score": 92.3,
         "industry": "半導體業"
       },
       {
         "symbol": "3167",
-        "weight": 0.053,
+        "weight": 0.0473,
         "score": 90.7,
         "industry": "電機機械"
       },
       {
         "symbol": "6515",
-        "weight": 0.0518,
+        "weight": 0.0462,
         "score": 88.57,
         "industry": "電子工業"
       },
       {
         "symbol": "6442",
-        "weight": 0.0488,
+        "weight": 0.0436,
         "score": 83.49,
         "industry": "電子工業"
       },
       {
         "symbol": "3030",
-        "weight": 0.0454,
+        "weight": 0.0406,
         "score": 77.76,
         "industry": "電子工業"
       },
       {
         "symbol": "6139",
-        "weight": 0.0431,
+        "weight": 0.0385,
         "score": 73.73,
         "industry": "其他電子業"
+      },
+      {
+        "symbol": "3653",
+        "weight": 0.0375,
+        "score": 71.96,
+        "industry": "電子零組件業"
       }
     ],
     "theme_concentration": {
-      "tech_weight": 0.35,
-      "tech_count": 7,
-      "total_positions": 7,
+      "tech_weight": 0.3501,
+      "tech_count": 8,
+      "total_positions": 8,
       "top_industry": "電子工業",
-      "top_industry_weight": 0.146,
+      "top_industry_weight": 0.1304,
       "industries": {
-        "電子工業": 0.146,
-        "電子零組件業": 0.054,
-        "半導體業": 0.0539,
-        "電機機械": 0.053,
-        "其他電子業": 0.0431
+        "電子工業": 0.1304,
+        "電子零組件業": 0.0857,
+        "半導體業": 0.0482,
+        "電機機械": 0.0473,
+        "其他電子業": 0.0385
       }
     },
     "factor_detail": [
@@ -2261,8 +1710,8 @@
     "selected_count": 8,
     "universe_size": 80,
     "universe_fingerprint": "f5ddd52d2672",
-    "one_way_turnover": 0.3123,
-    "trade_cost": 0.00178,
+    "one_way_turnover": 0.2976,
+    "trade_cost": 0.001696,
     "data_degraded": false,
     "data_degraded_reasons": [],
     "factor_coverage": {
