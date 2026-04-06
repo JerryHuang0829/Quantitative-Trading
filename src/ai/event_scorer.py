@@ -7,7 +7,7 @@
 2. 送入 LLM 做結構化分類
 3. 回傳 EventScore
 
-建議接入順序（參考 優化建議.md）：
+建議接入順序（參考 優化紀錄.md）：
 1. 先用 OpenAI API 做 event_score（驗證是否降低誤判）
 2. 低價值文本初篩移到本地 gpt-oss-20b
 3. 穩定後再加入 fundamental_score

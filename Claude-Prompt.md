@@ -1,202 +1,215 @@
 # Claude 交接 Prompt
 
-更新日期：2026-04-02  
-用途：這份檔只保留 **Codex 已獨立驗證的事項**、**尚未完全獨立驗證的界線**，以及 **Claude 下一輪應優先處理的事**。
+最後更新：2026-04-07
+請用中文回覆。
 
-請先讀：
-- `Quantitative-Trading/Codex-Prompt.md`
-- `Quantitative-Trading/優化建議.md`
-- `Quantitative-Trading/優化紀錄.md`
-- `Quantitative-Trading/策略研究.md`
+---
 
-但請注意：
-**不要只看 md，請以目前程式碼、tests、設定檔、artifact 為準。**  
-如果 md 與程式或 artifact 衝突，請以程式與 artifact 為準，並同步修正文檔。
+## 一. 專案現況總覽
 
-## 1. Codex 已驗證
+### 策略設定
 
-### Walk-forward 結果
-- `reports/walk_forward/summary.json` 已由 Codex 獨立驗算：
-  - `windows = 11`
-  - `mean_sharpe = 1.3835`
-  - `median_sharpe = 1.2709`
-  - `win_rate = 0.7273`
-  - 全部 window：
-    - `data_degraded = false`
-    - `degraded_periods = 0`
-- `reports/walk_forward/summary_old_backup.json` 已驗證：
-  - `mean_sharpe = 1.2169`
-  - 全部 `data_degraded = true`
-  - 沒有 `degraded_periods` 欄位
+- 台股 long-only，月中再平衡，`tw_3m_stable` profile
+- 三因子：`price_momentum`（55%）、`trend_quality`（20%）、`revenue_momentum`（25%）
+- 已停用：`institutional_flow`（0%，rank IC 全期為負）、`quality`（0%，稀釋動能）
+- `top_n=8`、`max_same_industry=3`、`caution exposure=0.70`
 
-### P4.9 degraded 修復
-- `src/backtest/engine.py` 目前只會對 `weight > 0` 的因子做 coverage degraded 檢查
-- `config/settings.yaml` 目前：
-  - `institutional_flow: 0.00`
-- 因此 P4.9 的 false alarm 修復可視為已落地
+### 回測績效（P6，2026-04-07 乾淨 cache + backtest_mode）
 
-### zero-weight skip
-- `src/portfolio/tw_stock.py` 已確認：
-  - `institutional_flow` 權重為 0 時，不會呼叫 `fetch_institutional()`
-  - `quality` 權重為 0 時，不會呼叫 `fetch_financial_quality()`
-- 對應測試存在於：
-  - `tests/test_zero_weight_skip.py`
+| 回測 | Sharpe | Alpha | MDD | CVaR 95% | Tail Ratio | 偏態 | JB p | 性質 |
+|------|--------|-------|-----|----------|------------|------|------|------|
+| 6M（2024-H2） | 0.81 | +5.94% | -25.48% | -4.76% | 1.00 | -0.74 | 0.00 | IS |
+| 4Y（2022-2025） | 1.41 | +25.68% | -28.09% | -3.60% | 0.98 | -0.50 | 0.00 | IS+OOS |
+| **Walk-Forward 平均** | **1.22** | **+39.70%** | **-23.80%** | — | — | — | — | **11 段 OOS** |
 
-### finmind.py DataFrame fallback bug fix
-- `src/data/finmind.py` 已確認不再使用 `cached or fallback()`
-- 現在改為：
-  - `cached if (cached is not None and not cached.empty) else fallback`
-- CSV fallback 相關函式也已存在：
-  - `_load_stock_info_csv_fallback()`
-  - `_save_stock_info_csv_snapshot()`
-  - `_ensure_stock_info_csv()`
+注意：P5→P6 的 4Y Sharpe 1.44→1.41 差異來自不同電腦 cache 資料差異，選股邏輯未改動。
 
-### 架構與檔案存在性
-- `tests/` 目前共有 **135 個測試函式**
-- `config/settings.yaml` 中 `backtest` 常數已存在
-- `TECH_SUPPLY_CHAIN_KEYWORDS` 已抽到 `src/utils/constants.py`
-- `src/backtest/engine.py` 與 `scripts/paper_trade.py` 都有共用該常數
-- `data/cache/stock_info/stock_info_snapshot.csv` 實際存在
-- core modules、scripts、dashboard 頁面 `py_compile` 通過
+### 完成狀態
 
-## 2. Codex 尚未完全獨立驗證
+| 階段 | 狀態 |
+|------|------|
+| P0 Research Integrity | ✅ |
+| P1 Grid Search（max_same_industry 2→3） | ✅ + Codex 驗證 |
+| P2 因子/Exposure（IF 0%） | ✅ + Codex + Claude 雙重驗證 |
+| P3 策略擴展（vol_weighted ❌、quality ❌） | ✅ + Codex 驗證 |
+| P4.0-P4.4 / P4.8 / P4.9 工程化 | ✅ |
+| P5 雙視角審查 + 工程修復（5 輪 + Codex） | ✅ 87 測試 |
+| **P6 度量層 + Cache 機制** | **✅ 2026-04-07 完成** |
+| Streamlit Dashboard（5 頁） | ✅ |
+| 小額實盤追蹤工具 | ✅ `scripts/real_trade.py` |
+| Claude Code Skills（5 commands + 1 agent） | ✅ `.claude/commands/` + `.claude/agents/` |
 
-### 全套 pytest
-- Codex 已確認：
-  - repo 內確實有 `135` 個測試函式
-  - `tests/test_metrics.py` 本機可跑通：`27 passed, 1 warning`
-- 但 Codex **沒有在本機完整重跑成功整包 pytest**
-- 因此文件中請不要寫成：
-  - 「Codex 已完整驗證 135 passed」
-- 正確寫法應是：
-  - Claude 已跑通全套
-  - Codex 已獨立確認測試數量、部分測試可跑、核心模組語法正常
-  - 但 Codex 未在本機完整重跑整包 pytest
+---
 
-## 3. 仍存在的限制與殘餘風險
+## 二. 2026-04-06~07 完成的工作（P6）
 
-### benchmark 仍是 price-only
-- `src/backtest/metrics.py` 目前仍會輸出：
-  - `benchmark_type = "price_only"`
-- 所以目前所有 alpha、IR、超額報酬解讀仍有口徑限制
-- 請不要把目前 walk-forward alpha 寫成完全乾淨的最終結論
+### P6 修改清單
 
-### institutional_flow coverage 語意仍不乾淨
-- `src/backtest/engine.py` 目前仍用：
-  - `institutional_raw != 0`
-  近似 coverage
-- 這會把：
-  - 真實零流量
-  - 無資料
-  混在一起
-- 目前因 IF 權重為 0，不會再誤觸 degraded
-- 但語意層仍未完全修乾淨
+| 項目 | 內容 | 檔案 |
+|------|------|------|
+| P6.1 | `slippage_bps` 5→10（中型股實際約 10-15bps/邊） | `config/settings.yaml` |
+| P6.2 | CVaR 95% + Tail Ratio + Drawdown Duration（最大/平均水下天數 + 水下比例） | `src/backtest/metrics.py` |
+| P6.3 | Skewness + Kurtosis + Jarque-Bera 常態性檢定（p<0.05 → Sharpe 不完全可信） | `src/backtest/metrics.py` |
+| P6.4 | Bootstrap Sharpe 95% CI（10,000 次重抽，CI 含 0 → 策略不顯著） | `scripts/walk_forward.py` |
+| P6.5 | 動能分散度（`score_dispersion`：eligible 分數 std + IQR） | `src/backtest/engine.py` |
+| P6.6 | `backtest_mode`：回測時跳過所有 cache TTL，直接用 cache，0 API 呼叫 | `src/data/finmind.py` |
+| P6.7 | `scipy>=1.11.0` 加入依賴 | `requirements.txt` |
 
-## 4. Claude 下一輪應執行的任務
+### P6.6 backtest_mode 詳細說明
 
-### 任務一：IF coverage missing-aware 修正（30 分鐘，低風險）
+**問題**：`_DiskCache` 各資料集有 TTL（ohlcv 3 天、institutional 7 天、revenue 45 天等），過期後重打 FinMind API。但免費額度 600 req/hr 不夠用 → 部分股票 `Failed to fetch` → 候選股池每次不同 → 回測結果不可重現。
 
-**目標**：讓 `institutional_raw` 停用時為 `None` 而非 `0.0`，消除「零流量 vs 無資料」的語意混淆。
+**解法**：`FinMindSource` 新增 `backtest_mode: bool = False` 參數。開啟後，所有 `fetch_*` 方法在 cache 存在時直接回傳，跳過 TTL 和增量更新邏輯。
 
-**改動清單**：
+**呼叫端修改**：
+- `scripts/run_backtest.py`：`FinMindSource(token=token, backtest_mode=True)` ✅
+- `scripts/walk_forward.py`：`FinMindSource(token=token, backtest_mode=True)` ✅
+- `main.py`（Live 模式）：預設 `False`，不受影響
+- `scripts/paper_trade.py`：預設 `False`，需要最新資料
 
-| 檔案 | 行號 | 改什麼 |
-|------|------|--------|
-| `src/portfolio/tw_stock.py` | 651-656, 728 | `institutional_raw` 預設改 `None`；`institutional_detail` 改從局部變數讀取 |
-| `src/backtest/engine.py` | 469 | coverage 判斷從 `!= 0` 改為 `is not None`（與 revenue_momentum 一致） |
-| `tests/test_zero_weight_skip.py` | 138 | `assert == 0` → `assert is None` |
-| `tests/conftest.py` | 52 | `make_analysis` 預設 `inst=0.0` → `inst=None` |
+**效果**：連續跑 3 次回測，數字完全一致。速度從幾分鐘（打 API）降到幾秒（純 cache 讀取）。
 
-**不需要改的（已確認安全）**：
-- `_rank_analyses`：IF weight=0 → `if weight <= 0: continue` 跳過整個因子
-- `factor_detail` snapshot：`None` → JSON `null`，正常
-- `test_ranking.py`：有明確傳 `inst=100` 的測試，不受預設值影響
-- `test_engine_integration.py`：FakeSource 不設 institutional_raw
+### Claude Code Skills（同日新增）
 
-**模式參考**：跟 `quality_raw`（tw_stock.py 行 660）完全一樣。
+在 `Quantitative Trading/.claude/` 下建立 5 個 commands + 1 個 agent（已在 git repo 內）：
 
-**驗證**：`pytest tests/ -v` → 135 passed
+| 類型 | 名稱 | 用途 |
+|------|------|------|
+| Command | `/run-backtest` | Docker 回測 + 自動比對 baseline |
+| Command | `/walk-forward` | Walk-Forward 驗證 + PASS/FAIL 判定 |
+| Command | `/monthly-rebalance` | 月度 Paper Trading + 實盤指引 |
+| Command | `/factor-research` | 因子研究（opus model） |
+| Command | `/code-review-quant` | 雙視角程式碼審查（opus model） |
+| Agent | `quant-analyst` | 多步策略分析子代理 |
 
-### 任務二：Total Return Benchmark / P4.5（1-2 天，中風險）
+### 文件整理（同日）
 
-**目標**：用 TWSE 除權息資料讓 benchmark 從 price-only 升級為含配息的 total return，使 Alpha 精確。
+- `優化建議.md` 已合併進 `優化紀錄.md`（刪除重複檔案）
+- `Codex-Prompt.md` 重寫為 P6 + 整體架構獨立驗證
+- `CLAUDE.md` 新增 Skills 索引區塊
+- 所有引用 `優化建議.md` 的檔案已更新指向 `優化紀錄.md`
 
-**架構**：
-```
-TWSE 除權息 API ──→ twse_scraper.py（新函式）
-                         ↓
-                    finmind.py（快取 + 呼叫）
-                         ↓
-                    engine.py（benchmark 流程注入配息）
-                         ↓
-                    metrics.py（benchmark_type 參數化）
-```
+### Cache 資料替換（04-07）
 
-**步驟**：
+原本的 `data/cache/` 在 04-06 首次跑 P6 回測時被部分覆蓋（TTL 過期 → 重抓 API → 部分失敗 → 混合體）。已從另一台電腦匯入乾淨的 cache_backup 替換。
 
-**Step 1：`src/data/twse_scraper.py`** — 新增 `fetch_twse_dividends(symbol, start_date, end_date)`
-- TWSE 端點：`https://www.twse.com.tw/rwd/zh/exRight/TWT49U`
-- 參數：`stockNo=0050`, `startDate`, `endDate`（YYYYMMDD）
-- 回傳：`pd.DataFrame[ex_date, cash_dividend]`
-- 沿用現有 scraper 的 retry / error handling 模式
-- 資料量極小（0050 約每年除息 1-2 次，10 年 ~20 筆）
+替換前後比較：
+- ohlcv: 1955 → **2034** 支股票
+- institutional: 134 → **527**
+- revenue: 191 → **554**
+- 舊的混合 cache 保留在 `data/cache_polluted/`（可刪除）
 
-**Step 2：`src/data/finmind.py`** — 新增 `fetch_benchmark_dividends(symbol, start_date, end_date)`
-- 用 `_DiskCache` 快取（`dividends/0050.pkl`）
-- 沿用 OHLCV 的 append-only 快取模式
+### 驗證結果
 
-**Step 3：`src/backtest/metrics.py`** — 新增 `apply_dividend_reinvestment(price_returns, dividends_df, close_series)`
-- 除息日 total return = price return + (cash_dividend / 前一日收盤價)
-- `compute_metrics()` 新增 `benchmark_type` 參數（預設 `"price_only"`），取代硬編碼
+| 驗證項 | 結果 |
+|--------|------|
+| Docker 87 測試 | **87 passed** ✅ |
+| 本機 29 測試 | **29 passed** ✅ |
+| 6M 回測（乾淨 cache） | Sharpe 0.81, Alpha +5.94% ✅ |
+| 4Y 回測（乾淨 cache） | Sharpe 1.41, Alpha +25.68% ✅ |
+| backtest_mode 可重現性 | 連跑 3 次數字一致 ✅ |
+| P6 新指標全部輸出 | CVaR/Tail Ratio/偏態/峰度/JB 全有 ✅ |
 
-**Step 4：`src/backtest/engine.py`** — benchmark 流程注入（行 329-334 之後）
-- try/except：成功 → `benchmark_type = "total_return"`；失敗 → fallback 到 price-only
+---
 
-**Step 5：測試**
-- 新增 `tests/test_total_return_benchmark.py`：已知答案、mock HTTP、fallback 測試
-- 修改 `tests/test_engine_integration.py`：FakeSource 加 `fetch_benchmark_dividends()` 回傳空 DataFrame
+## 三. 關鍵檔案位置
 
-**風險控制**：TWSE API 不穩定 → try/except + fallback，不影響回測主流程
+| 檔案 | 用途 |
+|------|------|
+| `config/settings.yaml` | 策略參數 + `backtest:` + `slippage_bps: 10` |
+| `src/backtest/engine.py` | 回測引擎 + `_DataSlicer` + `_compute_score_dispersion()` |
+| `src/backtest/metrics.py` | KPI 計算 + CVaR/Tail Ratio/偏態/峰度/JB + `adjust_splits()` |
+| `src/backtest/universe.py` | 歷史 Universe 管理 |
+| `src/portfolio/tw_stock.py` | 核心選股邏輯（1293 行，不要動） |
+| `src/data/finmind.py` | FinMind API + pickle cache + `backtest_mode` + CSV fallback |
+| `src/data/twse_scraper.py` | TWSE/TPEX JSON API（成交金額排名，用於 universe 預篩） |
+| `src/data/base.py` | DataSource 抽象介面 |
+| `src/utils/constants.py` | 共用常數 |
+| `scripts/run_backtest.py` | 回測 CLI（`backtest_mode=True`） |
+| `scripts/walk_forward.py` | Walk-Forward（`backtest_mode=True` + Bootstrap Sharpe CI） |
+| `scripts/paper_trade.py` | Paper trading 記錄器 |
+| `scripts/real_trade.py` | 小額實盤追蹤 |
+| `dashboard/` | Streamlit Dashboard（5 頁） |
+| `tests/` | 87 個測試（8 個測試檔） |
+| `.claude/commands/` | 5 個 Claude Code skills |
+| `.claude/agents/quant-analyst.md` | 量化分析子代理 |
+| `Codex-Prompt.md` | Codex 驗證 Prompt（P6 + 整體架構） |
+| `data/cache/` | pickle 快取（.gitignore，不進 git） |
+| `data/cache_polluted/` | 被汙染的舊 cache（可刪除） |
+| `data/cache_backup/` | 空資料夾（backup 已移入 cache/，可刪除） |
 
-### 執行順序
+---
 
-1. 任務一（IF coverage）→ 跑測試確認 135 passed
-2. 任務二 Step 1-2（scraper + cache）
-3. 任務二 Step 3（metrics 函式）
-4. 任務二 Step 4（engine 接線）
-5. 任務二 Step 5（測試）
-6. 全套 pytest 回歸
-7. 重跑 Dashboard 6M 確認 `benchmark_type` 從 `price_only` → `total_return`
-8. 更新 MD 文件 + 生成 Codex 驗證 Prompt
+## 四. 下一步行動清單（按優先度）
 
-### 驗證方式
+### 第一優先：Docker 執行
 
 ```bash
-# 每步完成後
-docker compose run --rm --entrypoint python portfolio-bot -m pytest tests/ -v
+# 重跑 Walk-Forward（含 Bootstrap Sharpe CI + backtest_mode）
+docker compose run --rm --entrypoint python portfolio-bot \
+    scripts/walk_forward.py \
+    --train-months 18 --test-months 6 \
+    --start 2019-01-01 --end 2025-12-31 \
+    --output-dir reports/walk_forward
 
-# 任務二完成後，重跑 Dashboard 6M
-docker compose run --rm --entrypoint python portfolio-bot scripts/run_backtest.py \
-    --start 2024-06-01 --end 2024-12-31 --output-dir reports/backtests/dashboard_6m
-
-# 確認 benchmark_type 變化
-python -c "import json; m=json.load(open('reports/backtests/dashboard_6m/backtest_20240601_20241231_metrics.json')); print(m['benchmark_type'])"
+# 驗證：summary.json 應包含 bootstrap_sharpe_ci_lo/hi/significant
 ```
 
-## 5. 目前不要做的事
+### 第二優先：補測試覆蓋
 
-- 改策略參數
-- 改 exposure
-- 改 AI 導入方向
-- 改 ranking 主因子
-- 擴寫新的研究分支
+| 項目 | 檔案 | 說明 |
+|------|------|------|
+| BacktestEngine 整合測試 | `tests/test_engine.py`（新建） | 用 mock data 跑 mini backtest |
+| finmind.py 核心測試 | `tests/test_finmind.py`（新建） | cache hit/miss、backtest_mode |
 
-## 6. 回覆格式
+### 第三優先：回測精度
 
-請用以下格式回覆：
+| 項目 | 說明 |
+|------|------|
+| P4.5 Total Return Benchmark | 含配息，修正 Alpha 偏差 ~2-3%/年 |
+| P4.6 Drift-aware 日報酬 | 持有期內權重隨股價更新 |
 
-1. Findings
-2. Changes made
-3. Validation
-4. Residual risks
-5. Next actions
+### Paper Trading 時間表
+
+- 2026-03：第一筆 ✅
+- 2026-04-14：執行第二筆
+- 2026-04~06：累積數據
+- 2026-10~：正式評估（對比 Walk-Forward Sharpe 1.22）
+- **警戒線**：Sharpe < 0.7 或 Alpha 轉負
+
+---
+
+## 五. 不要做的事
+
+- ❌ 調整 `score_weights` / `exposure` / `top_n` / `caution`（已 grid search + Codex 驗證）
+- ❌ 把 `institutional_flow` 或 `quality` 拉回（已測試，績效下降）
+- ❌ 把 AI 加進 ranking（AI 只做市場風向 + 事件風控）
+- ❌ 同時改多個東西（一次改一項）
+- ❌ 在 paper trading 累積 6 個月前投入實資金
+- ❌ 刪除 `data/cache/`（回測依賴它，重建需 10+ 小時 API 額度）
+
+---
+
+## 六. 技術備註
+
+- **Docker vs Windows**：回測/Walk-Forward/Paper Trading 在 Docker 跑；Dashboard 和 real_trade.py 在 Windows 本機
+- **測試**：Docker 87 passed；Windows 本地 29 passed
+- **Cache**：`data/cache/` 在 `.gitignore`，不進 git。換電腦需手動複製或重建
+- **pickle 版本相容性**：backup cache 由較新版 numpy 建立，Windows 本機 Python 3.11 讀不了（`numpy._core` 錯誤），Docker 正常。如需本機跑回測，需升級 numpy
+- **scipy**：P6.3 新增依賴，已加入 `requirements.txt`，Docker image 已重建
+- **`--slippage-bps` CLI 參數**：`run_backtest.py` 預設值 5，`settings.yaml` 設 10。engine.py 會優先讀 yaml
+- **`--label` 不存在**：`run_backtest.py` 沒有 `--label` 參數，用 `--output-dir` 指定輸出目錄
+
+---
+
+## 七. 文件索引
+
+| 文件 | 內容 | 最後更新 |
+|------|------|---------|
+| `Claude-Prompt.md` | 本檔（Claude 交接用） | 2026-04-07 |
+| `Codex-Prompt.md` | Codex 驗證 Prompt（P6 + 整體架構） | 2026-04-06 |
+| `優化紀錄.md` | 完整修改歷程 + 路線圖 + 回測數據 + 雙視角評估 | 2026-04-07 |
+| `策略研究.md` | P1-P3 因子研究結論 | 2026-04-01 |
+| `教學進度.md` | 程式碼逐檔解析、觀念教學 | 2026-04-02 |
+| `README.md` | 專案架構、Docker 操作 | 2026-04-02 |
+| `CLAUDE.md` | Claude Code 指引 + Skills 索引 | 2026-04-06 |

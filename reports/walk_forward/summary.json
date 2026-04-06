@@ -3,196 +3,77 @@
     "train_months": 18,
     "test_months": 6,
     "start": "2019-01-01",
-    "end": "2025-12-31",
-    "total_windows": 11,
-    "valid_windows": 11
+    "end": "2025-12-31"
   },
   "aggregate": {
-    "mean_sharpe": 1.3835,
-    "median_sharpe": 1.2709,
-    "std_sharpe": 2.3164,
-    "min_sharpe": -3.2984,
-    "max_sharpe": 5.6911,
-    "win_rate": 0.7273,
-    "mean_alpha": 0.4344,
-    "worst_mdd": -0.238
+    "error": "No valid windows completed"
   },
   "windows": [
     {
       "window": 1,
-      "train_start": "2019-01-01",
-      "train_end": "2020-07-01",
       "test_start": "2020-07-01",
       "test_end": "2021-01-01",
-      "sharpe": 2.4183,
-      "annualized_return": 0.89067,
-      "annualized_alpha": 0.191968,
-      "max_drawdown": -0.104318,
-      "annualized_volatility": 0.272854,
-      "beta": 0.8497,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 2,
-      "train_start": "2019-07-01",
-      "train_end": "2021-01-01",
       "test_start": "2021-01-01",
       "test_end": "2021-07-01",
-      "sharpe": 2.3789,
-      "annualized_return": 0.949667,
-      "annualized_alpha": 0.8481,
-      "max_drawdown": -0.129176,
-      "annualized_volatility": 0.292441,
-      "beta": 0.8174,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 3,
-      "train_start": "2020-01-01",
-      "train_end": "2021-07-01",
       "test_start": "2021-07-01",
       "test_end": "2022-01-01",
-      "sharpe": 0.1756,
-      "annualized_return": 0.02954,
-      "annualized_alpha": -0.109481,
-      "max_drawdown": -0.122759,
-      "annualized_volatility": 0.22788,
-      "beta": 0.9115,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 4,
-      "train_start": "2020-07-01",
-      "train_end": "2022-01-01",
       "test_start": "2022-01-01",
       "test_end": "2022-07-01",
-      "sharpe": -3.2984,
-      "annualized_return": -0.418741,
-      "annualized_alpha": 0.083429,
-      "max_drawdown": -0.213685,
-      "annualized_volatility": 0.164707,
-      "beta": 0.5337,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 5,
-      "train_start": "2021-01-01",
-      "train_end": "2022-07-01",
       "test_start": "2022-07-01",
       "test_end": "2023-01-01",
-      "sharpe": 1.2709,
-      "annualized_return": 0.202988,
-      "annualized_alpha": 0.386019,
-      "max_drawdown": -0.079778,
-      "annualized_volatility": 0.141582,
-      "beta": 0.3586,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 6,
-      "train_start": "2021-07-01",
-      "train_end": "2023-01-01",
       "test_start": "2023-01-01",
       "test_end": "2023-07-01",
-      "sharpe": 5.6911,
-      "annualized_return": 2.355148,
-      "annualized_alpha": 2.11581,
-      "max_drawdown": -0.073173,
-      "annualized_volatility": 0.214603,
-      "beta": 0.6018,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 7,
-      "train_start": "2022-01-01",
-      "train_end": "2023-07-01",
       "test_start": "2023-07-01",
       "test_end": "2024-01-01",
-      "sharpe": 0.5508,
-      "annualized_return": 0.123458,
-      "annualized_alpha": 0.046266,
-      "max_drawdown": -0.137046,
-      "annualized_volatility": 0.233997,
-      "beta": 0.5297,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 8,
-      "train_start": "2022-07-01",
-      "train_end": "2024-01-01",
       "test_start": "2024-01-01",
       "test_end": "2024-07-01",
-      "sharpe": 3.6753,
-      "annualized_return": 2.268192,
-      "annualized_alpha": 1.034615,
-      "max_drawdown": -0.123751,
-      "annualized_volatility": 0.334011,
-      "beta": 0.4747,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 9,
-      "train_start": "2023-01-01",
-      "train_end": "2024-07-01",
       "test_start": "2024-07-01",
       "test_end": "2025-01-01",
-      "sharpe": -0.4412,
-      "annualized_return": -0.159404,
-      "annualized_alpha": -0.040208,
-      "max_drawdown": -0.238027,
-      "annualized_volatility": 0.314366,
-      "beta": 0.6163,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 10,
-      "train_start": "2023-07-01",
-      "train_end": "2025-01-01",
       "test_start": "2025-01-01",
       "test_end": "2025-07-01",
-      "sharpe": -0.2958,
-      "annualized_return": -0.048734,
-      "annualized_alpha": 0.034472,
-      "max_drawdown": -0.179741,
-      "annualized_volatility": 0.170372,
-      "beta": 0.4412,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     },
     {
       "window": 11,
-      "train_start": "2024-01-01",
-      "train_end": "2025-07-01",
       "test_start": "2025-07-01",
       "test_end": "2025-12-31",
-      "sharpe": 3.0925,
-      "annualized_return": 1.053528,
-      "annualized_alpha": 0.187685,
-      "max_drawdown": -0.080902,
-      "annualized_volatility": 0.237192,
-      "beta": 0.771,
-      "n_rebalances": 6,
-      "data_degraded": false,
-      "degraded_periods": 0
+      "error": "No module named 'scipy'"
     }
   ]
 }

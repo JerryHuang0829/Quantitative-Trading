@@ -67,6 +67,28 @@ def _compute_theme_concentration(
     }
 
 
+def _compute_score_dispersion(ranked: list[dict]) -> dict | None:
+    """計算橫截面分數分散度（監控用）。
+
+    低分散度 = 股票間分數差異小 = 排名效果差 = 動能策略信心應降低。
+    歷史 25th percentile 以下視為低分散度。
+    """
+    scores = [
+        item["portfolio_score"]
+        for item in ranked
+        if item.get("eligible") and item.get("portfolio_score") is not None
+    ]
+    if len(scores) < 5:
+        return None
+    import numpy as np
+    arr = np.array(scores)
+    return {
+        "std": round(float(arr.std()), 4),
+        "iqr": round(float(np.percentile(arr, 75) - np.percentile(arr, 25)), 4),
+        "n_eligible": len(scores),
+    }
+
+
 class _DataSlicer:
     """包裝 source，將所有資料截斷到 as_of 日期以避免 look-ahead bias。
 
@@ -551,6 +573,7 @@ class BacktestEngine:
                     if item.get("eligible", False)
                 ],
                 "config_hash": compute_config_hash(self._portfolio_config),
+                "score_dispersion": _compute_score_dispersion(ranked),
             }
             monthly_snapshots.append(snapshot)
 

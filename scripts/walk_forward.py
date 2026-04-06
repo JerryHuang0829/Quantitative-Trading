@@ -81,6 +81,31 @@ def _generate_windows(
     return windows
 
 
+def _bootstrap_sharpe_ci(sharpes: list[float], n_bootstrap: int = 10000, ci: float = 0.95) -> dict:
+    """Bootstrap confidence interval for mean Sharpe ratio.
+
+    Resamples the window-level Sharpe ratios *n_bootstrap* times and
+    returns the *ci* confidence interval.  If the CI includes 0, the
+    strategy's outperformance is not statistically significant.
+    """
+    if len(sharpes) < 3:
+        return {"bootstrap_sharpe_ci_lo": None, "bootstrap_sharpe_ci_hi": None,
+                "bootstrap_sharpe_significant": None}
+    arr = np.array(sharpes)
+    rng = np.random.default_rng(42)
+    boot_means = np.array([
+        rng.choice(arr, size=len(arr), replace=True).mean()
+        for _ in range(n_bootstrap)
+    ])
+    alpha = (1 - ci) / 2
+    lo, hi = float(np.percentile(boot_means, alpha * 100)), float(np.percentile(boot_means, (1 - alpha) * 100))
+    return {
+        "bootstrap_sharpe_ci_lo": round(lo, 4),
+        "bootstrap_sharpe_ci_hi": round(hi, 4),
+        "bootstrap_sharpe_significant": lo > 0,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Walk-Forward validation")
     parser.add_argument("--config", default="config/settings.yaml")
@@ -97,7 +122,7 @@ def main():
 
     config = load_config(args.config)
     token = os.getenv("FINMIND_TOKEN")
-    source = FinMindSource(token=token)
+    source = FinMindSource(token=token, backtest_mode=True)
 
     start = datetime.strptime(args.start, "%Y-%m-%d")
     end = datetime.strptime(args.end, "%Y-%m-%d")
@@ -185,6 +210,7 @@ def main():
                 "win_rate": round(sum(1 for s in sharpes if s > 0) / len(sharpes), 4),
                 "mean_alpha": round(float(np.mean(alphas)), 4) if alphas else None,
                 "worst_mdd": round(float(np.min(mdds)), 4) if mdds else None,
+                **_bootstrap_sharpe_ci(sharpes),
             },
             "windows": results,
         }
@@ -226,6 +252,14 @@ def main():
             print(f"  平均 Alpha:   {agg['mean_alpha']:.2%}")
         if agg.get("worst_mdd") is not None:
             print(f"  最差 MDD:     {agg['worst_mdd']:.2%}")
+
+        # Bootstrap Sharpe CI
+        ci_lo = agg.get("bootstrap_sharpe_ci_lo")
+        ci_hi = agg.get("bootstrap_sharpe_ci_hi")
+        if ci_lo is not None:
+            sig = agg.get("bootstrap_sharpe_significant", False)
+            sig_str = "✅ 顯著（CI 不含 0）" if sig else "⚠️ 不顯著（CI 包含 0）"
+            print(f"  Bootstrap 95% CI: [{ci_lo:.2f}, {ci_hi:.2f}]  {sig_str}")
 
         print(f"\n  --- 各視窗明細 ---")
         for r in results:

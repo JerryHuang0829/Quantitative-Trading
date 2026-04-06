@@ -137,6 +137,42 @@ def compute_metrics(
     result["max_drawdown_start"] = str(dd_start_idx) if dd_start_idx is not None else None
     result["max_drawdown_end"] = str(dd_end_idx) if dd_end_idx is not None else None
 
+    # --- 尾部風險指標 ---
+    # CVaR (Expected Shortfall) 95%: 最差 5% 日子的平均虧損
+    percentile_5 = np.percentile(portfolio_returns, 5)
+    cvar_95 = float(portfolio_returns[portfolio_returns <= percentile_5].mean()) if (portfolio_returns <= percentile_5).any() else 0.0
+    result["cvar_95"] = round(cvar_95, 6)
+
+    # Tail Ratio: |P95| / |P5|，<1.0 代表下行尾巴比上行大
+    percentile_95 = np.percentile(portfolio_returns, 95)
+    tail_ratio = abs(percentile_95) / abs(percentile_5) if percentile_5 != 0 else 0.0
+    result["tail_ratio"] = round(tail_ratio, 4)
+
+    # Drawdown Duration: 最大水下天數 + 平均水下天數
+    underwater = drawdowns < 0
+    if underwater.any():
+        # 找出每段水下期間的長度
+        dd_groups = (~underwater).cumsum()
+        dd_durations = underwater.groupby(dd_groups).sum()
+        dd_durations = dd_durations[dd_durations > 0]
+        result["max_drawdown_duration_days"] = int(dd_durations.max()) if len(dd_durations) > 0 else 0
+        result["avg_drawdown_duration_days"] = round(float(dd_durations.mean()), 1) if len(dd_durations) > 0 else 0.0
+        # 水下時間比例
+        result["underwater_pct"] = round(float(underwater.sum()) / len(underwater), 4)
+    else:
+        result["max_drawdown_duration_days"] = 0
+        result["avg_drawdown_duration_days"] = 0.0
+        result["underwater_pct"] = 0.0
+
+    # --- 分布特徵 ---
+    from scipy import stats as sp_stats
+    result["skewness"] = round(float(sp_stats.skew(portfolio_returns)), 4)
+    result["kurtosis"] = round(float(sp_stats.kurtosis(portfolio_returns)), 4)
+    # Jarque-Bera 常態性檢定：p < 0.05 表示非常態，Sharpe 不完全可信
+    jb_stat, jb_pvalue = sp_stats.jarque_bera(portfolio_returns)
+    result["jarque_bera_stat"] = round(float(jb_stat), 4)
+    result["jarque_bera_pvalue"] = round(float(jb_pvalue), 6)
+
     # --- 風險調整報酬 ---
     daily_rf = (1 + risk_free_rate) ** (1 / TRADING_DAYS_PER_YEAR) - 1
     excess_daily = portfolio_returns - daily_rf
@@ -207,6 +243,19 @@ def format_report(metrics: dict, benchmark_name: str = "0050") -> str:
     lines.append("--- 風險指標 ---")
     lines.append(f"  年化波動率:     {metrics.get('annualized_volatility', 0):.2%}")
     lines.append(f"  最大回撤:       {metrics.get('max_drawdown', 0):.2%}")
+    if "max_drawdown_duration_days" in metrics:
+        lines.append(f"  最大水下天數:   {metrics.get('max_drawdown_duration_days', 0)} 天")
+        lines.append(f"  平均水下天數:   {metrics.get('avg_drawdown_duration_days', 0):.1f} 天")
+        lines.append(f"  水下時間比例:   {metrics.get('underwater_pct', 0):.1%}")
+    if "cvar_95" in metrics:
+        lines.append(f"  CVaR 95%:       {metrics.get('cvar_95', 0):.2%}")
+        lines.append(f"  Tail Ratio:     {metrics.get('tail_ratio', 0):.2f}")
+    if "skewness" in metrics:
+        lines.append(f"  偏態:           {metrics.get('skewness', 0):.2f}")
+        lines.append(f"  峰度:           {metrics.get('kurtosis', 0):.2f}")
+        jb_p = metrics.get("jarque_bera_pvalue", 1.0)
+        normality = "非常態 ⚠️" if jb_p < 0.05 else "近似常態"
+        lines.append(f"  Jarque-Bera p:  {jb_p:.4f} ({normality})")
     lines.append("")
 
     lines.append("--- 風險調整報酬 ---")

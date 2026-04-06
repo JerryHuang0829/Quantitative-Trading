@@ -134,6 +134,7 @@ class FinMindSource(DataSource):
         request_interval: float = 0.5,
         use_adjusted: bool = True,
         cache_dir: str | None = None,
+        backtest_mode: bool = False,
     ):
         from FinMind.data import DataLoader
 
@@ -142,6 +143,8 @@ class FinMindSource(DataSource):
         self._last_request_time: float = 0.0
         self._simple_cache = _SimpleCache()
         self._use_adjusted = use_adjusted
+
+        self._backtest_mode = backtest_mode
 
         if cache_dir is None:
             cache_dir = os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
@@ -207,10 +210,18 @@ class FinMindSource(DataSource):
         now = datetime.now()
         end_str = now.strftime("%Y-%m-%d")
         want_start = now - timedelta(days=int(limit * 1.8))
-        # 容忍 3 天間隔（週五快取 → 週日不觸發向前延伸）
-        stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=3)
 
         cached = self._disk.load("ohlcv", symbol)
+
+        # Backtest mode: historical data is immutable — use cache as-is, skip all refresh.
+        if self._backtest_mode and cached is not None and not cached.empty:
+            start_ts = pd.Timestamp(want_start, tz="UTC")
+            result = cached[cached.index >= start_ts]
+            result = result[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
+            return result if not result.empty else None
+
+        # 容忍 3 天間隔（週五快取 → 週日不觸發向前延伸）
+        stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=3)
         changed = False
 
         if cached is not None and not cached.empty:
@@ -289,9 +300,15 @@ class FinMindSource(DataSource):
     def fetch_institutional(self, symbol: str, days: int = 30) -> pd.DataFrame | None:
         now = datetime.now()
         end_str = now.strftime("%Y-%m-%d")
-        stale_boundary = pd.Timestamp(now.date()) - pd.Timedelta(days=3)
 
         cached = self._disk.load("institutional", symbol)
+
+        # Backtest mode: use cache as-is, skip all refresh.
+        if self._backtest_mode and cached is not None:
+            if cached.empty:
+                return None
+            return cached.sort_values("date") if "date" in cached.columns else cached
+
         changed = False
 
         if cached is not None:
@@ -371,6 +388,13 @@ class FinMindSource(DataSource):
         end_str = now.strftime("%Y-%m-%d")
 
         cached = self._disk.load("revenue", symbol)
+
+        # Backtest mode: use cache as-is, skip all refresh.
+        if self._backtest_mode and cached is not None:
+            if cached.empty:
+                return None
+            return cached
+
         changed = False
 
         if cached is not None:
@@ -432,6 +456,12 @@ class FinMindSource(DataSource):
     def fetch_stock_info(self) -> pd.DataFrame | None:
         # Snapshot dataset — cache with 7-day TTL
         cached = self._disk.load("stock_info")
+
+        # Backtest mode: use cache as-is, skip TTL check.
+        if self._backtest_mode and cached is not None:
+            self._ensure_stock_info_csv(cached)
+            return cached
+
         meta = self._disk.meta("stock_info")
         if cached is not None and meta:
             if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
@@ -497,6 +527,11 @@ class FinMindSource(DataSource):
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
         # Snapshot dataset — cache with 1-day TTL
         cached = self._disk.load("market_value")
+
+        # Backtest mode: use cache as-is, skip TTL check.
+        if self._backtest_mode and cached is not None:
+            return cached
+
         meta = self._disk.meta("market_value")
         if cached is not None and meta:
             if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 1:
@@ -538,6 +573,11 @@ class FinMindSource(DataSource):
 
     def fetch_delisting(self) -> pd.DataFrame | None:
         cached = self._disk.load("delisting")
+
+        # Backtest mode: use cache as-is, skip TTL check.
+        if self._backtest_mode and cached is not None:
+            return cached
+
         meta = self._disk.meta("delisting")
         if cached is not None and meta:
             if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:

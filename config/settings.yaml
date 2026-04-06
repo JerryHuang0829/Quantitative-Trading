@@ -69,7 +69,8 @@ portfolio:
     caution: 0.70
     risk_off: 0.35
   # 交易成本與換倉門檻
-  turnover_cost: 0.0047          # 台股來回成本 ≈ 0.47%
+  turnover_cost: 0.0047          # 台股來回成本 ≈ 0.47%（手續費+證交稅）
+  slippage_bps: 10               # 滑價 10bps/邊（中型股實際約 10-15bps）
   turnover_score_threshold: 6.0  # 新股 score 需超過被替換股至少 N 分
   # 產業分散
   max_same_industry: 3           # 同產業最多 N 檔（P1 驗證：2→3）

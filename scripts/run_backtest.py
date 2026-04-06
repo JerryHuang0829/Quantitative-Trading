@@ -130,14 +130,14 @@ def _resolve_token_and_source(benchmark: str) -> FinMindSource:
 
     if not tokens:
         print("WARNING: 未設定任何 FINMIND_TOKEN，使用匿名模式（配額極低）")
-        source = FinMindSource(token=None)
+        source = FinMindSource(token=None, backtest_mode=True)
         if _preflight_check(source, benchmark_symbol=benchmark):
             return source
         raise SystemExit(1)
 
     for env_key, token in tokens:
         print(f"\n嘗試 {env_key} ...")
-        source = FinMindSource(token=token)
+        source = FinMindSource(token=token, backtest_mode=True)
         if _preflight_check(source, benchmark_symbol=benchmark):
             print(f"使用 {env_key} 進行回測\n")
             return source
