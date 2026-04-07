@@ -18,7 +18,7 @@ from ..portfolio.tw_stock import (
 )
 from ..storage.database import compute_config_hash
 from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS
-from .metrics import adjust_splits, compute_metrics, format_report
+from .metrics import adjust_dividends, adjust_splits, compute_metrics, format_report
 from .universe import HistoricalUniverse
 
 logger = logging.getLogger(__name__)
@@ -301,6 +301,7 @@ class BacktestEngine:
         self._inst_fallback_days = int(_bt.get("institutional_fallback_days", 500))
         self._error_rate_threshold = float(_bt.get("error_rate_threshold", 0.2))
         self._factor_coverage_threshold = float(_bt.get("factor_coverage_threshold", 0.3))
+        self._dividends: list[dict] | None = None
 
     def run(
         self,
@@ -347,11 +348,33 @@ class BacktestEngine:
         hist_universe = HistoricalUniverse(slicer)
         hist_universe.load()
 
-        # --- 取得 benchmark 日線報酬（含 stock split 自動調整）---
+        # --- 取得除息資料（P4.5 total return adjustment）---
+        # Dividend year range must cover the benchmark's full OHLCV lookback
+        # (default 3000 days ≈ 8 years), not just backtest start-1.  Otherwise
+        # early benchmark prices miss dividend adjustments → benchmark total
+        # return is understated → Alpha is overstated.
+        _div_start_year = (start_date - timedelta(days=self._benchmark_lookback)).year
+        self._dividends: list[dict] | None = None
+        try:
+            self._dividends = self._source.fetch_dividends(
+                _div_start_year, end_date.year,
+            )
+            if self._dividends:
+                # Defensive: drop any ex_date beyond backtest end to prevent
+                # look-ahead if price data accidentally extends past end_date.
+                cutoff = end_date.strftime("%Y-%m-%d")
+                self._dividends = [d for d in self._dividends if d["ex_date"] <= cutoff]
+                logger.info("Dividend data loaded: %d records (up to %s)", len(self._dividends), cutoff)
+        except Exception as exc:
+            logger.warning("Could not fetch dividend data — running without dividend adjustment: %s", exc)
+
+        # --- 取得 benchmark 日線報酬（含 split + dividend 調整）---
         bench_df = self._source.fetch_ohlcv(benchmark_symbol, "D", self._benchmark_lookback)
         benchmark_daily: pd.Series | None = None
         if bench_df is not None and not bench_df.empty:
             adjusted_close = adjust_splits(bench_df["close"])
+            if self._dividends:
+                adjusted_close = adjust_dividends(adjusted_close, self._dividends, benchmark_symbol)
             benchmark_daily = adjusted_close.pct_change().dropna()
 
         # --- 逐月 replay ---
@@ -595,6 +618,9 @@ class BacktestEngine:
 
         # --- 計算 KPI ---
         metrics = compute_metrics(portfolio_daily, benchmark_daily)
+        # Override benchmark_type if dividends were applied (P4.5)
+        if self._dividends and metrics.get("benchmark_type") == "price_only":
+            metrics["benchmark_type"] = "total_return"
         report = format_report(metrics, benchmark_symbol)
 
         # 補充換手率與交易成本統計
@@ -658,7 +684,10 @@ class BacktestEngine:
             if len(period_df) < 2:
                 continue
 
-            daily_ret = period_df["close"].pct_change().dropna()
+            adjusted_close = adjust_splits(period_df["close"])
+            if self._dividends:
+                adjusted_close = adjust_dividends(adjusted_close, self._dividends, symbol)
+            daily_ret = adjusted_close.pct_change().dropna()
             # 過濾 inf：收盤價含 0 或資料錯誤時 pct_change 可能產生 inf，
             # dropna() 不會移除 inf，必須明確替換，否則一個壞點汙染整個 KPI。
             n_inf = daily_ret.isin([float("inf"), float("-inf")]).sum()
@@ -675,7 +704,7 @@ class BacktestEngine:
         if not stock_daily_returns:
             return []
 
-        # 建立日頻加權報酬
+        # 建立日頻報酬矩陣
         ret_df = pd.DataFrame(stock_daily_returns)
         # 用持倉權重加權
         weights = pd.Series(holdings)
@@ -689,10 +718,24 @@ class BacktestEngine:
         if w_sum <= 0:
             return []
 
-        # 歸一化權重（投資部分）
-        portfolio_ret = (ret_df[common] * w).sum(axis=1)
+        # --- Drift-aware 日報酬（P4.6）---
+        # 以目標權重作為初始 dollar value，每日隨股價漂移更新。
+        # 未投資部分（cash = 1 - w_sum）報酬為 0，隱含現金拖累。
+        # 等同「buy-and-hold within period」，比固定權重更精確。
+        values = w.copy().astype(float)
+        cash = 1.0 - w_sum  # 未投資現金部位
+        results: list[tuple[pd.Timestamp, float]] = []
+        for date in ret_df.index:
+            total_before = values.sum() + cash
+            if total_before <= 0:
+                break
+            day_rets = ret_df.loc[date, common].fillna(0.0)
+            values = values * (1.0 + day_rets)
+            total_after = values.sum() + cash
+            port_ret = total_after / total_before - 1.0
+            results.append((date, port_ret))
 
-        return [(date, ret) for date, ret in portfolio_ret.items()]
+        return results
 
     @staticmethod
     def _one_way_turnover(

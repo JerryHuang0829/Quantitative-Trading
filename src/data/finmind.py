@@ -778,3 +778,52 @@ class FinMindSource(DataSource):
             logger.warning("Failed to check trading day via market data: %s", exc)
 
         return False
+
+    # -------------------------------------------------------- Dividends (P4.5)
+
+    def fetch_dividends(self, start_year: int, end_year: int) -> list[dict] | None:
+        """Fetch ex-dividend records for total-return price adjustment.
+
+        Uses TWSE scraping with disk cache (dataset='dividends', TTL=7 days).
+        Returns list of dicts: {stock_id, ex_date, cash_dividend, ...}.
+
+        Note: dividend records are a list (not DataFrame), so we use pickle
+        directly instead of the _DiskCache helper which expects DataFrames.
+        """
+        import pickle as _pkl
+
+        cache_path = self._disk._path("dividends")
+
+        # Try loading from disk cache
+        cached: list[dict] | None = None
+        if cache_path.exists():
+            try:
+                with open(cache_path, "rb") as f:
+                    cached = _pkl.load(f)
+            except Exception as exc:
+                logger.warning("Dividend cache read failed: %s", exc)
+
+        if self._backtest_mode and cached is not None:
+            return cached
+
+        meta = self._disk.meta("dividends")
+        if cached is not None and meta:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+                return cached
+
+        from .twse_scraper import fetch_twse_dividends
+
+        try:
+            records = fetch_twse_dividends(start_year, end_year)
+            if records:
+                try:
+                    with open(cache_path, "wb") as f:
+                        _pkl.dump(records, f)
+                except Exception as exc:
+                    logger.warning("Dividend cache write failed: %s", exc)
+                self._disk.save_meta("dividends", datetime.now().strftime("%Y-%m-%d"))
+                return records
+        except Exception as exc:
+            logger.warning("Failed to fetch TWSE dividends: %s", exc)
+
+        return cached

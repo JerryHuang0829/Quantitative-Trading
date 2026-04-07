@@ -33,3 +33,10 @@ class DataSource(ABC):
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
         """Optional market value dataset used for universe prefiltering."""
         return None
+
+    def fetch_dividends(self, start_year: int, end_year: int) -> list[dict] | None:
+        """Optional ex-dividend records for total-return price adjustment.
+
+        Returns list of dicts with keys: stock_id, ex_date, cash_dividend.
+        """
+        return None

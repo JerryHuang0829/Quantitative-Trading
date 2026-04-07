@@ -81,6 +81,97 @@ def adjust_splits(prices: pd.Series) -> pd.Series:
     return adjusted
 
 
+def adjust_dividends(
+    prices: pd.Series,
+    dividends: list[dict],
+    symbol: str,
+) -> pd.Series:
+    """Forward-adjust closing prices for cash dividends (total return series).
+
+    On each ex-dividend date, all prior prices are multiplied by an adjustment
+    factor so that ``pct_change()`` on the result yields total returns
+    (price change + reinvested dividends).
+
+    Parameters
+    ----------
+    prices : pd.Series
+        Closing price series indexed by date (sorted ascending).
+        Should already be split-adjusted via ``adjust_splits()``.
+    dividends : list[dict]
+        Each dict must have keys: stock_id, ex_date (str 'YYYY-MM-DD'),
+        cash_dividend (float).  Optionally ``close_before`` (closing price
+        the day before ex-date in original units) for split-safe adjustment.
+    symbol : str
+        Stock ID to filter dividends for.
+
+    Returns
+    -------
+    pd.Series
+        Dividend-adjusted closing prices (same index).
+    """
+    if not dividends or prices.empty or len(prices) < 2:
+        return prices.copy()
+
+    # Filter dividends for this symbol
+    sym_divs = [
+        d for d in dividends
+        if d["stock_id"] == symbol and d["cash_dividend"] > 0
+    ]
+    if not sym_divs:
+        return prices.copy()
+
+    adjusted = prices.copy().astype(float)
+
+    # Process from oldest to newest: unlike splits (which use a price ratio
+    # invariant to scale), dividend adjustment adds a fixed dollar amount.
+    # Processing newest-to-oldest would use already-reduced prices in the
+    # factor denominator, causing over-adjustment.  Oldest-first ensures each
+    # ex-date's price_on_ex is the original (un-adjusted by later dividends).
+    sym_divs.sort(key=lambda d: d["ex_date"], reverse=False)
+
+    for div in sym_divs:
+        ex_date_str = div["ex_date"]
+        cash_div = div["cash_dividend"]
+
+        # Find the ex-date in the price index
+        ex_ts = pd.Timestamp(ex_date_str, tz=prices.index.tz)
+        if ex_ts not in adjusted.index:
+            # Try matching without exact timestamp (date-level match)
+            matches = adjusted.index[adjusted.index.normalize() == ex_ts.normalize()]
+            if matches.empty:
+                continue
+            ex_ts = matches[0]
+
+        loc = adjusted.index.get_loc(ex_ts)
+        if loc == 0:
+            continue
+
+        # Adjustment factor: use scale-invariant formula when close_before
+        # is available (from TWSE data).  This avoids the mismatch between
+        # split-adjusted prices and original-unit dividend amounts.
+        #   factor = 1 - cash_div / close_before  (≡ ref_price / close_before)
+        # Fallback: factor = price_on_ex / (price_on_ex + cash_div) — only
+        # correct when the price series has NOT been split-adjusted.
+        close_before = div.get("close_before")
+        if close_before and close_before > 0:
+            factor = 1.0 - cash_div / close_before
+        else:
+            price_on_ex = adjusted.iloc[loc]
+            if price_on_ex <= 0:
+                continue
+            factor = price_on_ex / (price_on_ex + cash_div)
+        if factor <= 0 or factor >= 1:
+            continue
+        adjusted.iloc[:loc] *= factor
+
+        logger.debug(
+            "Dividend adjust %s on %s: $%.2f div, factor %.6f, adjusted %d prior prices",
+            symbol, ex_date_str, cash_div, factor, loc,
+        )
+
+    return adjusted
+
+
 def compute_metrics(
     portfolio_returns: pd.Series,
     benchmark_returns: pd.Series | None = None,
@@ -222,9 +313,8 @@ def compute_metrics(
             beta = cov_matrix.loc["portfolio", "benchmark"] / bench_var if bench_var > 0 else 1.0
             result["beta"] = round(beta, 4)
 
-            # Benchmark 類型標記：目前使用未還原除息價格
-            # FinMind TaiwanStockPriceAdj 在目前帳號不可用，所有股票（含 0050）均為 price-only
-            # 組合與 benchmark 同口徑比較，alpha 大致公平，但雙方都低估約 2-3% 年化殖利率
+            # Default to price_only; engine.py overrides to "total_return"
+            # when dividend data is available (P4.5).
             result["benchmark_type"] = "price_only"
 
     return result

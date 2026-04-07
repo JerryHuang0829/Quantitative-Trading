@@ -278,3 +278,126 @@ def fetch_twse_issued_capital() -> dict[str, int]:
     if result:
         logger.info("Total issued capital fetched: %d companies (TWSE + TPEX)", len(result))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Ex-dividend data (除權息) for total-return price adjustment (P4.5)
+# ---------------------------------------------------------------------------
+
+_TWSE_EX_DIVIDEND_URL = "https://www.twse.com.tw/rwd/zh/exRight/TWT49U"
+
+
+def _parse_roc_date(roc_str: str) -> str | None:
+    """Convert ROC date like '112年07月18日' to '2023-07-18'.
+
+    Returns None if parsing fails.
+    """
+    import re
+    m = re.match(r"(\d+)\D+(\d+)\D+(\d+)", roc_str)
+    if not m:
+        return None
+    year = int(m.group(1)) + 1911
+    month = int(m.group(2))
+    day = int(m.group(3))
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def fetch_twse_dividends(start_year: int, end_year: int) -> list[dict]:
+    """Fetch ex-dividend records from TWSE for the given year range.
+
+    Queries TWT49U endpoint year-by-year (TWSE limits range to ~1 year).
+    Returns list of dicts with keys:
+        stock_id, ex_date, cash_dividend, close_before, ref_price
+
+    Only returns cash dividend (息) records, not stock dividend (權).
+    Stock dividends are similar to splits and are already handled by
+    adjust_splits() in metrics.py.
+    """
+    import time
+
+    all_records: list[dict] = []
+
+    for year in range(start_year, end_year + 1):
+        year_start_str = f"{year}0101"
+        year_end_str = f"{year}1231"
+
+        try:
+            resp = requests.get(
+                _TWSE_EX_DIVIDEND_URL,
+                params={
+                    "startDate": year_start_str,
+                    "endDate": year_end_str,
+                    "response": "json",
+                },
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
+            )
+            if resp.status_code != 200:
+                logger.warning("TWSE TWT49U HTTP %d for year %d", resp.status_code, year)
+                continue
+
+            data = resp.json()
+            rows = data.get("data", [])
+            if not rows:
+                logger.debug("TWSE TWT49U: no data for year %d", year)
+                continue
+
+            year_count = 0
+            for row in rows:
+                if len(row) < 7:
+                    continue
+
+                # [6] = 權/息 type: "息" = cash only, "權" = stock only, "權息" = both
+                # Only include pure cash dividend ("息").  "權息" records have
+                # close_before - ref_price that includes stock dividend value
+                # (10-30% yield vs actual cash ~1-3%), causing massive over-
+                # adjustment.  Stock dividends are already handled by
+                # adjust_splits() in metrics.py.
+                div_type = str(row[6]).strip()
+                if div_type != "息":
+                    continue
+
+                stock_id = str(row[1]).strip()
+                ex_date = _parse_roc_date(str(row[0]))
+                if not ex_date or not stock_id:
+                    continue
+
+                # [3] = close before ex-date, [4] = reference price after
+                # cash_dividend = close_before - ref_price (for pure cash div)
+                try:
+                    close_before = float(str(row[3]).replace(",", ""))
+                    ref_price = float(str(row[4]).replace(",", ""))
+                except (ValueError, TypeError):
+                    continue
+
+                cash_dividend = round(close_before - ref_price, 6)
+                if cash_dividend <= 0:
+                    continue
+
+                all_records.append({
+                    "stock_id": stock_id,
+                    "ex_date": ex_date,
+                    "cash_dividend": cash_dividend,
+                    "close_before": close_before,
+                    "ref_price": ref_price,
+                })
+                year_count += 1
+
+            logger.info(
+                "TWSE dividends %d: %d cash-dividend records from %d rows",
+                year, year_count, len(rows),
+            )
+
+        except Exception as exc:
+            logger.warning("TWSE TWT49U failed for year %d: %s", year, exc)
+
+        # Rate limit between years
+        if year < end_year:
+            time.sleep(1.0)
+
+    logger.info(
+        "TWSE dividends total: %d records across %d-%d",
+        len(all_records), start_year, end_year,
+    )
+    return all_records
