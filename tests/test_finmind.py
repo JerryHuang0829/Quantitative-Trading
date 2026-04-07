@@ -51,7 +51,7 @@ class TestDiskCache:
         cache.save_meta("stock_info", "2026-04-01")
         assert cache.meta("stock_info") == "2026-04-01"
 
-    def test_corrupted_pickle_returns_none_and_deletes(self, tmp_path):
+    def test_corrupted_pickle_returns_none_and_keeps_file(self, tmp_path):
         cache = _DiskCache(tmp_path / "cache")
         # Write garbage to the pickle file
         path = cache._path("ohlcv", "BAD")
@@ -59,7 +59,7 @@ class TestDiskCache:
         path.write_bytes(b"not a pickle")
         result = cache.load("ohlcv", "BAD")
         assert result is None
-        assert not path.exists()  # should be deleted
+        assert path.exists()  # P7: log-only, don't delete (avoid data loss on version mismatch)
 
     def test_subdirectories_created_automatically(self, tmp_path):
         cache = _DiskCache(tmp_path / "deep" / "cache")
@@ -136,6 +136,7 @@ class TestFetchStockInfo:
             s.loader = MagicMock()
             s._last_request_time = 0
             s._request_interval = 0  # no rate limiting in tests
+            s._backtest_mode = False
             return s
 
     def test_fresh_fetch_caches_and_saves_csv(self, source):

@@ -166,14 +166,13 @@ class _DataSlicer:
                 self._ohlcv_cache[symbol] = df
 
     def preload_reference_data(self, backtest_days: int = 2500) -> None:
-        """預載入市值等參考資料（回測全期間）。"""
-        if "market_value" not in self._df_cache:
-            mv = self._source.fetch_market_value(days=backtest_days)
-            # 即使回傳 None 也要 cache（以空 DataFrame 作為哨兵值），
-            # 避免後續 fetch_market_value() 重複發出相同的 API 請求。
-            self._df_cache["market_value"] = (
-                mv if (mv is not None and not mv.empty) else pd.DataFrame()
-            )
+        """預載入參考資料（回測全期間）。
+
+        P7: market_value 不再用於選股排序（改用成交金額），
+        因此不再預載入以避免浪費 TWSE API 呼叫。
+        market_value 仍可透過 fetch_market_value() 取得（監控用途）。
+        """
+        pass
 
     # --- OHLCV（index 為 UTC timestamp）---
 

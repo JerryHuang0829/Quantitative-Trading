@@ -17,11 +17,11 @@ allowed-tools: ["Bash", "Read", "Write", "Glob", "Grep", "TodoWrite"]
 ## 執行流程
 
 ### Step 1：讀取上月記錄
-- 讀取 `Quantitative Trading/reports/paper_trading/history.json`（如有）
+- 讀取 `reports/paper_trading/history.json`（如有）
 - 記錄上月的目標持股和權重
 
 ### Step 2：讀取實盤狀態
-工作目錄：`c:/Users/a0979/OneDrive/桌面/project/Quantitative Trading`
+工作目錄：`專案根目錄（自動偵測，不要寫死路徑）`
 
 ```bash
 python scripts/real_trade.py status

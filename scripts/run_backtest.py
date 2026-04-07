@@ -89,15 +89,15 @@ def _preflight_check(source, benchmark_symbol: str = "0050") -> bool:
     except Exception as exc:
         print(f"  [WARN] MonthRevenue (2330): {exc} — revenue factor will be zero")
 
-    # 5. Market Value — 警告（universe 排序降級為 size proxy）
+    # 5. Market Value — 監控用（不影響選股，P7 改用 close×volume 排序）
     try:
         df = source.fetch_market_value(days=5)
         if df is not None and not df.empty:
-            print(f"  [OK] MarketValue: {len(df)} rows")
+            print(f"  [OK] MarketValue (monitoring): {len(df)} rows")
         else:
-            print("  [WARN] MarketValue: empty — universe will use size proxy fallback")
+            print("  [INFO] MarketValue: empty — not used for selection (monitoring only)")
     except Exception as exc:
-        print(f"  [WARN] MarketValue: {exc} — universe will use size proxy fallback")
+        print(f"  [INFO] MarketValue: {exc} — not used for selection (monitoring only)")
 
     # 6. Delisting — 警告（survivorship bias 風險）
     try:

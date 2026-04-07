@@ -37,7 +37,7 @@ model: opus
 ## 執行流程
 
 ### Step 1：研究前準備
-- 讀取 `Quantitative Trading/策略研究.md` 了解已有研究結論
+- 讀取 `策略研究.md` 了解已有研究結論
 - 讀取 baseline 結果：
   - 3Y：`reports/backtests/dashboard_4y/backtest_20220101_20251231_metrics.json`
   - 6M：`reports/backtests/dashboard_6m/backtest_20240601_20241231_metrics.json`
@@ -135,7 +135,7 @@ docker compose run --rm backtest --start 2022-01-01 --end 2024-12-31 --label res
 ```
 
 ### Step 7：追加到策略研究.md
-將報告追加到 `Quantitative Trading/策略研究.md` 末尾。
+將報告追加到 `策略研究.md` 末尾。
 
 ## 重要提醒
 - 所有回覆使用**繁體中文**

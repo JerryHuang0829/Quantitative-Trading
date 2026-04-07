@@ -80,7 +80,7 @@ model: opus
 - 若為空：`git diff HEAD` 查看未提交的變更
 
 ### Step 2：讀取關鍵參考
-- 讀取 `Quantitative Trading/CLAUDE.md` 的修改守則
+- 讀取 `CLAUDE.md` 的修改守則
 - 如審查涉及 `tw_stock.py`：理解 `_analyze_symbol → _rank_analyses → _select_positions` 三步流程
 - 如審查涉及 `engine.py`：注意 `_DataSlicer` 用 empty DataFrame 作為 sentinel
 

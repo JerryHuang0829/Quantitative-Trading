@@ -20,14 +20,14 @@ allowed-tools: ["Bash", "Read", "Glob", "Grep", "TodoWrite"]
 ## 執行流程
 
 ### Step 1：讀取舊結果
-- 讀取 `Quantitative Trading/reports/walk_forward/summary.json` 作為比對基準
+- 讀取 `reports/walk_forward/summary.json` 作為比對基準
 - 記錄舊的 `aggregate` 欄位
 
 ### Step 2：驗證環境
 - 執行 `docker info` 確認 Docker 運作中
 
 ### Step 3：執行 Walk-Forward
-工作目錄：`c:/Users/a0979/OneDrive/桌面/project/Quantitative Trading`
+工作目錄：專案根目錄（自動偵測，不要寫死路徑）
 
 ```bash
 docker compose run --rm --entrypoint python portfolio-bot scripts/walk_forward.py \

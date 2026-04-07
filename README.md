@@ -3,7 +3,7 @@
 這個專案已從逐檔 `BUY/SELL` 訊號 bot，改成以 **台股 long-only 量化投組** 為核心的系統。主流程現在以「月度再平衡」為中心，而不是單檔即時訊號：
 
 1. 讀取台股股票池
-   - 可從 `symbols` 手動指定，也可由 FinMind `stock_info + market_value` 自動建池
+   - 可從 `symbols` 手動指定，也可由 FinMind `stock_info` + 成交金額排序（close×volume）自動建池
 2. 取得日線、法人與月營收資料
 3. 做橫截面 ranking
 4. 產生目標持股與目標權重
@@ -106,7 +106,7 @@ system:
 backtest:
   benchmark_lookback_days: 3000
   ohlcv_min_fetch_days: 2000
-  market_value_fetch_days: 2500
+  market_value_fetch_days: 2500        # 監控用，不用於選股排序
   institutional_fallback_days: 500
   error_rate_threshold: 0.2
   factor_coverage_threshold: 0.3
@@ -125,7 +125,7 @@ portfolio:
   min_avg_turnover: 50000000
 ```
 
-若 `use_auto_universe: true`，系統會先用 FinMind 的 `taiwan_stock_info` 與 `taiwan_stock_market_value` 建出全市場候選池，再套用市場別、ETF/ETN/權證排除與市值前段預篩。
+若 `use_auto_universe: true`，系統會先用 FinMind 的 `taiwan_stock_info` 建出全市場候選池，再以**成交金額（close×volume 20日均值）**排序篩選前 80 名，套用市場別、ETF/ETN/權證排除等條件。market_value 資料僅供 dashboard 監控用，不影響選股排序。
 
 `profile: tw_3m_stable` 代表目前推薦的主版本，偏向「較高且較穩的淨利」取向：
 

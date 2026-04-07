@@ -70,8 +70,8 @@ class _DiskCache:
             df = pd.read_pickle(path)
             self._mem[key] = df
             return df
-        except Exception:
-            path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Cache read failed for %s (keeping file): %s", path, exc)
             return None
 
     def save(self, dataset: str, df: pd.DataFrame, symbol: str = "_global") -> None:
@@ -525,7 +525,7 @@ class FinMindSource(DataSource):
     # --------------------------------------------------------- Market Value
 
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
-        # Snapshot dataset — cache with 1-day TTL
+        # Snapshot dataset — cache with 3-day TTL
         cached = self._disk.load("market_value")
 
         # Backtest mode: use cache as-is, skip TTL check.
@@ -534,9 +534,85 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("market_value")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 1:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 3:
                 return cached
 
+        # --- Primary: compute from TWSE shares × OHLCV cache ---
+        result = self._compute_market_value_from_twse()
+
+        # --- Fallback: FinMind API (for paid accounts) ---
+        if result is None:
+            result = self._fetch_market_value_finmind(days)
+
+        if result is not None and not result.empty:
+            self._disk.save("market_value", result)
+            self._disk.save_meta("market_value", datetime.now().strftime("%Y-%m-%d"))
+            return result
+
+        return cached
+
+    def _compute_market_value_from_twse(self) -> pd.DataFrame | None:
+        """Compute market_value = TWSE shares_outstanding × OHLCV close prices.
+
+        Reads shares outstanding from TWSE OpenAPI (one API call), then
+        multiplies by historical close prices from the OHLCV disk cache to
+        produce a full historical market_value DataFrame.
+        """
+        from .twse_scraper import fetch_twse_issued_capital
+
+        shares = fetch_twse_issued_capital()
+        if not shares:
+            return None
+
+        ohlcv_dir = self._disk._dir / "ohlcv"
+        if not ohlcv_dir.exists():
+            logger.warning("OHLCV cache directory not found; cannot compute historical market value")
+            return None
+
+        records: list[dict] = []
+        read_count = 0
+        for pkl_path in ohlcv_dir.glob("*.pkl"):
+            symbol = pkl_path.stem
+            if symbol not in shares:
+                continue
+            # Read directly instead of _DiskCache.load() to avoid
+            # file deletion on pickle version incompatibility (Windows).
+            try:
+                df = pd.read_pickle(pkl_path)
+            except Exception:
+                continue
+            if df is None or df.empty or "close" not in df.columns:
+                continue
+            read_count += 1
+            # Sample monthly (last trading day of each month) to keep cache compact
+            close = df[["close"]].copy()
+            close.index = pd.to_datetime(close.index, utc=True)
+            monthly = close.resample("ME").last().dropna()
+            for ts, row in monthly.iterrows():
+                # Strip timezone to produce naive dates (consistent with _DataSlicer)
+                records.append({
+                    "stock_id": symbol,
+                    "date": ts.tz_localize(None),
+                    "market_value": float(row["close"]) * shares[symbol],
+                })
+
+        if not records:
+            logger.warning("No OHLCV cache could be read for market value computation")
+            return None
+
+        result = pd.DataFrame(records)
+        result["date"] = pd.to_datetime(result["date"])
+        result["market_value"] = pd.to_numeric(result["market_value"], errors="coerce")
+        result = result.sort_values(["stock_id", "date"]).reset_index(drop=True)
+        logger.info(
+            "Market value computed from TWSE shares × OHLCV cache: "
+            "%d stocks, %d monthly records",
+            read_count, len(result),
+        )
+        return result
+
+    def _fetch_market_value_finmind(self, days: int = 10) -> pd.DataFrame | None:
+        """Fallback: fetch market_value from FinMind (requires paid account)."""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=max(days, 5))
 
@@ -548,26 +624,23 @@ class FinMindSource(DataSource):
             )
         except KeyError as exc:
             if str(exc) == "'data'":
-                logger.warning("Market value dataset unavailable with current FinMind access")
+                logger.info("FinMind market_value unavailable (free tier); using TWSE computation")
             else:
-                logger.warning("Failed to fetch market value: %s", exc)
-            return cached
+                logger.warning("Failed to fetch market value from FinMind: %s", exc)
+            return None
         except Exception as exc:
-            logger.warning("Failed to fetch market value: %s", exc)
-            return cached
+            logger.warning("Failed to fetch market value from FinMind: %s", exc)
+            return None
 
         if df is None or df.empty:
-            return cached
+            return None
 
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"])
         if "market_value" in df.columns:
             df["market_value"] = pd.to_numeric(df["market_value"], errors="coerce")
 
-        result = df.sort_values(["stock_id", "date"]).dropna(subset=["stock_id"])
-        self._disk.save("market_value", result)
-        self._disk.save_meta("market_value", datetime.now().strftime("%Y-%m-%d"))
-        return result
+        return df.sort_values(["stock_id", "date"]).dropna(subset=["stock_id"])
 
     # -------------------------------------------------------------- Delisting
 

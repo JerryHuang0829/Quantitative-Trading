@@ -175,3 +175,106 @@ def fetch_combined_turnover(as_of: datetime) -> dict[str, float]:
         len(twse), len(tpex), len(combined), as_of.strftime("%Y-%m-%d"),
     )
     return combined
+
+
+# ---------------------------------------------------------------------------
+# Market value (市值) computation from TWSE issued capital + close prices
+# ---------------------------------------------------------------------------
+
+_TWSE_COMPANY_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+_TPEX_COMPANY_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
+
+
+def _parse_company_profile(data: list[dict]) -> dict[str, int]:
+    """Parse TWSE/TPEX company profile JSON into {stock_id: shares_outstanding}.
+
+    Both TWSE and TPEX use the same field structure — field names are matched
+    by substring to avoid encoding issues on some platforms.
+    """
+    if not data:
+        return {}
+
+    sample = data[0]
+    stock_id_key = None
+    shares_key = None
+    capital_key = None
+    for k in sample.keys():
+        kl = k.lower()
+        if "公司代號" in k or "securitiescompanycod" in kl:
+            stock_id_key = k
+        elif "已發行" in k or k == "IssueShares":
+            shares_key = k
+        elif "實收資本額" in k or "paidin.capital" in kl:
+            capital_key = k
+
+    if not stock_id_key:
+        return {}
+
+    result: dict[str, int] = {}
+    for row in data:
+        sid = str(row.get(stock_id_key, "")).strip()
+        if not sid:
+            continue
+        try:
+            # Prefer direct shares outstanding field
+            if shares_key and row.get(shares_key):
+                shares = int(str(row[shares_key]).replace(",", ""))
+                if shares > 0:
+                    result[sid] = shares
+                    continue
+            # Fallback: issued capital / 10 (par value)
+            if capital_key and row.get(capital_key):
+                capital = int(float(str(row[capital_key]).replace(",", "")))
+                if capital > 0:
+                    result[sid] = capital // 10
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
+def fetch_twse_issued_capital() -> dict[str, int]:
+    """Return {stock_id: shares_outstanding} for all TWSE + TPEX stocks.
+
+    Fetches company profile data from both TWSE (上市) and TPEX (上櫃)
+    OpenAPI endpoints.  TPEX failure is non-fatal.
+    Returns empty dict on any error.
+    """
+    result: dict[str, int] = {}
+
+    # TWSE (上市)
+    try:
+        resp = requests.get(
+            _TWSE_COMPANY_URL,
+            timeout=_REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+            verify=False,
+        )
+        if resp.status_code == 200:
+            twse = _parse_company_profile(resp.json())
+            result.update(twse)
+            logger.info("TWSE issued capital: %d companies", len(twse))
+        else:
+            logger.warning("TWSE company profile HTTP %d", resp.status_code)
+    except Exception as exc:
+        logger.warning("TWSE issued capital fetch failed: %s", exc)
+
+    # TPEX (上櫃) — non-fatal
+    try:
+        resp = requests.get(
+            _TPEX_COMPANY_URL,
+            timeout=_REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+            verify=False,
+        )
+        if resp.status_code == 200:
+            tpex = _parse_company_profile(resp.json())
+            result.update(tpex)
+            logger.info("TPEX issued capital: %d companies", len(tpex))
+        else:
+            logger.debug("TPEX company profile HTTP %d", resp.status_code)
+    except Exception as exc:
+        logger.debug("TPEX issued capital fetch failed: %s", exc)
+
+    if result:
+        logger.info("Total issued capital fetched: %d companies (TWSE + TPEX)", len(result))
+    return result

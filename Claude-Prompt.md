@@ -13,16 +13,20 @@
 - 三因子：`price_momentum`（55%）、`trend_quality`（20%）、`revenue_momentum`（25%）
 - 已停用：`institutional_flow`（0%，rank IC 全期為負）、`quality`（0%，稀釋動能）
 - `top_n=8`、`max_same_industry=3`、`caution exposure=0.70`
+- **候選股池**：以 close×volume（20日均值）排序取前 80 名 — 正式規格，Live 和 Backtest 完全一致
+- **market_value**：已退出選股排序，僅供 dashboard 監控用（TWSE 股本 × OHLCV 收盤價計算）
+- **benchmark**：仍為 `price_only`（不含配息），Alpha 有 ~2-3%/年系統性高估
 
-### 回測績效（P6，2026-04-07 乾淨 cache + backtest_mode）
+### 回測績效（2026-04-07，第二台電腦）
 
-| 回測 | Sharpe | Alpha | MDD | CVaR 95% | Tail Ratio | 偏態 | JB p | 性質 |
-|------|--------|-------|-----|----------|------------|------|------|------|
-| 6M（2024-H2） | 0.81 | +5.94% | -25.48% | -4.76% | 1.00 | -0.74 | 0.00 | IS |
-| 4Y（2022-2025） | 1.41 | +25.68% | -28.09% | -3.60% | 0.98 | -0.50 | 0.00 | IS+OOS |
-| **Walk-Forward 平均** | **1.22** | **+39.70%** | **-23.80%** | — | — | — | — | **11 段 OOS** |
+| 回測 | Sharpe | Alpha | MDD | 性質 |
+|------|--------|-------|-----|------|
+| 6M（2024-H2） | 0.45 | -7.15% | -23.81% | IS |
+| 4Y（2022-2025） | 1.33 | +23.28% | -31.09% | IS+OOS |
+| **Walk-Forward 平均** | **1.15** | **+33.60%** | **-24.60%** | **11 段 OOS** |
+| Walk-Forward Bootstrap 95% CI | [-0.18, 2.48] | — | — | ⚠️ 不顯著（CI 包含 0） |
 
-注意：P5→P6 的 4Y Sharpe 1.44→1.41 差異來自不同電腦 cache 資料差異，選股邏輯未改動。
+另一台電腦數字不同（4Y Sharpe 1.41、WF 1.22），原因是 OHLCV cache 內容差異。選股邏輯完全相同。要一致需複製整個 `data/cache/`。
 
 ### 完成狀態
 
@@ -33,82 +37,62 @@
 | P2 因子/Exposure（IF 0%） | ✅ + Codex + Claude 雙重驗證 |
 | P3 策略擴展（vol_weighted ❌、quality ❌） | ✅ + Codex 驗證 |
 | P4.0-P4.4 / P4.8 / P4.9 工程化 | ✅ |
-| P5 雙視角審查 + 工程修復（5 輪 + Codex） | ✅ 87 測試 |
-| **P6 度量層 + Cache 機制** | **✅ 2026-04-07 完成** |
+| P5 雙視角審查 + 工程修復（5 輪 + Codex） | ✅ |
+| P6 度量層 + Cache 機制 | ✅ |
+| **P7 選股池正式化 + TWSE 市值監控 + 全面審查** | **✅** |
 | Streamlit Dashboard（5 頁） | ✅ |
 | 小額實盤追蹤工具 | ✅ `scripts/real_trade.py` |
-| Claude Code Skills（5 commands + 1 agent） | ✅ `.claude/commands/` + `.claude/agents/` |
+| Claude Code Skills（5 commands + 1 agent） | ✅ `.claude/commands/` |
 
 ---
 
-## 二. 2026-04-06~07 完成的工作（P6）
+## 二. P7 完成的工作（2026-04-07，第二台電腦）
 
-### P6 修改清單
+### P7 修改清單（共 15 項）
 
 | 項目 | 內容 | 檔案 |
 |------|------|------|
-| P6.1 | `slippage_bps` 5→10（中型股實際約 10-15bps/邊） | `config/settings.yaml` |
-| P6.2 | CVaR 95% + Tail Ratio + Drawdown Duration（最大/平均水下天數 + 水下比例） | `src/backtest/metrics.py` |
-| P6.3 | Skewness + Kurtosis + Jarque-Bera 常態性檢定（p<0.05 → Sharpe 不完全可信） | `src/backtest/metrics.py` |
-| P6.4 | Bootstrap Sharpe 95% CI（10,000 次重抽，CI 含 0 → 策略不顯著） | `scripts/walk_forward.py` |
-| P6.5 | 動能分散度（`score_dispersion`：eligible 分數 std + IQR） | `src/backtest/engine.py` |
-| P6.6 | `backtest_mode`：回測時跳過所有 cache TTL，直接用 cache，0 API 呼叫 | `src/data/finmind.py` |
-| P6.7 | `scipy>=1.11.0` 加入依賴 | `requirements.txt` |
+| P7.1 | Walk-Forward 重跑（含 Bootstrap Sharpe CI） | `reports/walk_forward/summary.json` |
+| P7.2 | Docker image 重建（修復 scipy 缺失） | Dockerfile |
+| P7.3 | `.dockerignore` 修復（加入 pytest 暫存） | `.dockerignore` |
+| P7.4 | TWSE+TPEX 股本抓取（1961 家） | `src/data/twse_scraper.py` |
+| P7.5 | `fetch_market_value()` 改為 TWSE 計算（監控用） | `src/data/finmind.py` |
+| P7.6 | 選股池正式化：close×volume 為正式規格 | `src/portfolio/tw_stock.py` |
+| P7.7 | 回測引擎移除 market_value 排序 | `src/backtest/universe.py` |
+| P7.8 | 清理 pytest 暫存資料夾 | 已刪除 |
+| P7.9 | 統一 Live/Backtest 排序為 close×volume | `src/backtest/universe.py` |
+| P7.10 | `_DiskCache.load()` 改為 log-only 不刪檔 | `src/data/finmind.py` |
+| P7.11 | 修正 test fixture 缺 `_backtest_mode` | `tests/test_finmind.py` |
+| P7.12 | 新增 12 個 P7 直接測試 | `tests/test_p7_universe.py` |
+| P7.13 | 刪除死碼 `_prepare_auto_universe()`（87 行） | `src/portfolio/tw_stock.py` |
+| P7.14 | revenue_momentum weight=0 時跳過 API | `src/portfolio/tw_stock.py` |
+| P7.15 | 移除無用的 `preload_reference_data()` market_value 呼叫 | `src/backtest/engine.py` |
 
-### P6.6 backtest_mode 詳細說明
+### 關鍵決策：為什麼不用 market_value 做選股
 
-**問題**：`_DiskCache` 各資料集有 TTL（ohlcv 3 天、institutional 7 天、revenue 45 天等），過期後重打 FinMind API。但免費額度 600 req/hr 不夠用 → 部分股票 `Failed to fetch` → 候選股池每次不同 → 回測結果不可重現。
+實測結果：用真實市值排序 → 6M Sharpe 從 0.81 降到 0.21（-74%）。
 
-**解法**：`FinMindSource` 新增 `backtest_mode: bool = False` 參數。開啟後，所有 `fetch_*` 方法在 cache 存在時直接回傳，跳過 TTL 和增量更新邏輯。
+原因：動能策略的 alpha 來自高交易量的活躍股票。用市值排序會納入「大但不活躍」的股票，稀釋動能效果。close×volume 排序是策略的正確規格，不是退而求其次。
 
-**呼叫端修改**：
-- `scripts/run_backtest.py`：`FinMindSource(token=token, backtest_mode=True)` ✅
-- `scripts/walk_forward.py`：`FinMindSource(token=token, backtest_mode=True)` ✅
-- `main.py`（Live 模式）：預設 `False`，不受影響
-- `scripts/paper_trade.py`：預設 `False`，需要最新資料
+### market_value 目前的角色
 
-**效果**：連續跑 3 次回測，數字完全一致。速度從幾分鐘（打 API）降到幾秒（純 cache 讀取）。
-
-### Claude Code Skills（同日新增）
-
-在 `Quantitative Trading/.claude/` 下建立 5 個 commands + 1 個 agent（已在 git repo 內）：
-
-| 類型 | 名稱 | 用途 |
-|------|------|------|
-| Command | `/run-backtest` | Docker 回測 + 自動比對 baseline |
-| Command | `/walk-forward` | Walk-Forward 驗證 + PASS/FAIL 判定 |
-| Command | `/monthly-rebalance` | 月度 Paper Trading + 實盤指引 |
-| Command | `/factor-research` | 因子研究（opus model） |
-| Command | `/code-review-quant` | 雙視角程式碼審查（opus model） |
-| Agent | `quant-analyst` | 多步策略分析子代理 |
-
-### 文件整理（同日）
-
-- `優化建議.md` 已合併進 `優化紀錄.md`（刪除重複檔案）
-- `Codex-Prompt.md` 重寫為 P6 + 整體架構獨立驗證
-- `CLAUDE.md` 新增 Skills 索引區塊
-- 所有引用 `優化建議.md` 的檔案已更新指向 `優化紀錄.md`
-
-### Cache 資料替換（04-07）
-
-原本的 `data/cache/` 在 04-06 首次跑 P6 回測時被部分覆蓋（TTL 過期 → 重抓 API → 部分失敗 → 混合體）。已從另一台電腦匯入乾淨的 cache_backup 替換。
-
-替換前後比較：
-- ohlcv: 1955 → **2034** 支股票
-- institutional: 134 → **527**
-- revenue: 191 → **554**
-- 舊的混合 cache 保留在 `data/cache_polluted/`（可刪除）
+| 位置 | 用途 | 影響選股？ |
+|------|------|-----------|
+| `finmind.py:fetch_market_value()` | TWSE 股本 × OHLCV 收盤價計算市值 | ❌ |
+| `run_backtest.py` preflight | 顯示 `[OK] MarketValue (monitoring)` | ❌ |
+| `engine.py:_DataSlicer.fetch_market_value()` | 可被外部呼叫（dashboard） | ❌ |
+| `tw_stock.py` / `universe.py` | **不再呼叫** | — |
 
 ### 驗證結果
 
 | 驗證項 | 結果 |
 |--------|------|
-| Docker 87 測試 | **87 passed** ✅ |
-| 本機 29 測試 | **29 passed** ✅ |
-| 6M 回測（乾淨 cache） | Sharpe 0.81, Alpha +5.94% ✅ |
-| 4Y 回測（乾淨 cache） | Sharpe 1.41, Alpha +25.68% ✅ |
-| backtest_mode 可重現性 | 連跑 3 次數字一致 ✅ |
-| P6 新指標全部輸出 | CVaR/Tail Ratio/偏態/峰度/JB 全有 ✅ |
+| Docker 測試 | **147 passed, 0 failed** ✅ |
+| Windows 本機 | 16 passed, 13 failed（缺 scipy，非程式問題） |
+| 6M 回測 | Sharpe 0.45 ✅ |
+| 4Y 回測 | Sharpe 1.33, Alpha +23.28% ✅ |
+| Walk-Forward | 11/11 通過，Sharpe 1.15 ✅ |
+| Live/Backtest 路徑一致 | ✅ 兩者都用 close×volume |
 
 ---
 
@@ -116,66 +100,50 @@
 
 | 檔案 | 用途 |
 |------|------|
-| `config/settings.yaml` | 策略參數 + `backtest:` + `slippage_bps: 10` |
-| `src/backtest/engine.py` | 回測引擎 + `_DataSlicer` + `_compute_score_dispersion()` |
-| `src/backtest/metrics.py` | KPI 計算 + CVaR/Tail Ratio/偏態/峰度/JB + `adjust_splits()` |
-| `src/backtest/universe.py` | 歷史 Universe 管理 |
-| `src/portfolio/tw_stock.py` | 核心選股邏輯（1293 行，不要動） |
-| `src/data/finmind.py` | FinMind API + pickle cache + `backtest_mode` + CSV fallback |
-| `src/data/twse_scraper.py` | TWSE/TPEX JSON API（成交金額排名，用於 universe 預篩） |
-| `src/data/base.py` | DataSource 抽象介面 |
-| `src/utils/constants.py` | 共用常數 |
+| `config/settings.yaml` | 策略參數（唯一正式設定檔） |
+| `src/portfolio/tw_stock.py` | 核心選股（close×volume 排序，~1200 行） |
+| `src/backtest/engine.py` | 回測引擎 + `_DataSlicer`（point-in-time） |
+| `src/backtest/universe.py` | 歷史 Universe（close×volume 排序，與 tw_stock.py 一致） |
+| `src/backtest/metrics.py` | KPI（含 CVaR/Tail Ratio/JB/Bootstrap CI） |
+| `src/data/finmind.py` | FinMind API + pickle cache + TWSE 市值計算 |
+| `src/data/twse_scraper.py` | TWSE/TPEX 成交金額 + 股本抓取 |
+| `src/strategy/regime.py` | 大盤多空判斷（ADX + SMA） |
 | `scripts/run_backtest.py` | 回測 CLI（`backtest_mode=True`） |
-| `scripts/walk_forward.py` | Walk-Forward（`backtest_mode=True` + Bootstrap Sharpe CI） |
-| `scripts/paper_trade.py` | Paper trading 記錄器 |
+| `scripts/walk_forward.py` | Walk-Forward + Bootstrap Sharpe CI |
+| `scripts/paper_trade.py` | Paper Trading 記錄器 |
 | `scripts/real_trade.py` | 小額實盤追蹤 |
-| `dashboard/` | Streamlit Dashboard（5 頁） |
-| `tests/` | 87 個測試（8 個測試檔） |
-| `.claude/commands/` | 5 個 Claude Code skills |
-| `.claude/agents/quant-analyst.md` | 量化分析子代理 |
-| `Codex-Prompt.md` | Codex 驗證 Prompt（P6 + 整體架構） |
-| `data/cache/` | pickle 快取（.gitignore，不進 git） |
-| `data/cache_polluted/` | 被汙染的舊 cache（可刪除） |
-| `data/cache_backup/` | 空資料夾（backup 已移入 cache/，可刪除） |
+| `tests/` | 147 個測試（12 個測試檔） |
+| `data/cache/` | pickle 快取（.gitignore，跨電腦需整個複製） |
+| `data/signals.db` | SQLite（Live/Paper Trading，跨電腦不需複製） |
 
 ---
 
-## 四. 下一步行動清單（按優先度）
+## 四. 下一步行動清單
 
-### 第一優先：Docker 執行
+### 第一優先：Paper Trading
 
-```bash
-# 重跑 Walk-Forward（含 Bootstrap Sharpe CI + backtest_mode）
-docker compose run --rm --entrypoint python portfolio-bot \
-    scripts/walk_forward.py \
-    --train-months 18 --test-months 6 \
-    --start 2019-01-01 --end 2025-12-31 \
-    --output-dir reports/walk_forward
+- 2026-04-14：執行第 2 筆月度再平衡
+- 持續累積至 2026-10 正式評估
+- 警戒線：Sharpe < 0.7 或 Alpha 轉負
 
-# 驗證：summary.json 應包含 bootstrap_sharpe_ci_lo/hi/significant
-```
-
-### 第二優先：補測試覆蓋
-
-| 項目 | 檔案 | 說明 |
-|------|------|------|
-| BacktestEngine 整合測試 | `tests/test_engine.py`（新建） | 用 mock data 跑 mini backtest |
-| finmind.py 核心測試 | `tests/test_finmind.py`（新建） | cache hit/miss、backtest_mode |
-
-### 第三優先：回測精度
+### 第二優先：回測精度
 
 | 項目 | 說明 |
 |------|------|
 | P4.5 Total Return Benchmark | 含配息，修正 Alpha 偏差 ~2-3%/年 |
 | P4.6 Drift-aware 日報酬 | 持有期內權重隨股價更新 |
 
-### Paper Trading 時間表
+### 第三優先：Cache 同步
 
-- 2026-03：第一筆 ✅
-- 2026-04-14：執行第二筆
-- 2026-04~06：累積數據
-- 2026-10~：正式評估（對比 Walk-Forward Sharpe 1.22）
-- **警戒線**：Sharpe < 0.7 或 Alpha 轉負
+兩台電腦的 `data/cache/` 內容不同。要讓回測結果一致，需挑一台當主機，複製整個 `data/cache/` 到另一台。「兩台都更新到最新日期」不能解決（只補已有股票的新資料，不會補從未抓過的股票）。
+
+### 未來研究（P8+）
+
+| 項目 | 說明 |
+|------|------|
+| P8 Size Factor | 市值大小當評分因子（需經 P2 同等嚴格測試） |
+| P4.10 券商對接 | Paper Trading 通過後用 CTS API 自動下單 |
+| P4.11 AI 整合 | AI 只做市場風向 + 事件風控，不進選股排名 |
 
 ---
 
@@ -183,22 +151,26 @@ docker compose run --rm --entrypoint python portfolio-bot \
 
 - ❌ 調整 `score_weights` / `exposure` / `top_n` / `caution`（已 grid search + Codex 驗證）
 - ❌ 把 `institutional_flow` 或 `quality` 拉回（已測試，績效下降）
-- ❌ 把 AI 加進 ranking（AI 只做市場風向 + 事件風控）
+- ❌ 把 AI 加進 ranking
 - ❌ 同時改多個東西（一次改一項）
 - ❌ 在 paper trading 累積 6 個月前投入實資金
-- ❌ 刪除 `data/cache/`（回測依賴它，重建需 10+ 小時 API 額度）
+- ❌ 刪除 `data/cache/`（重建需 10+ 小時 API 額度）
+- ❌ **用 market_value 做選股排序**（實測 Sharpe 降 74%，動能策略不適合大市值股池）
 
 ---
 
 ## 六. 技術備註
 
-- **Docker vs Windows**：回測/Walk-Forward/Paper Trading 在 Docker 跑；Dashboard 和 real_trade.py 在 Windows 本機
-- **測試**：Docker 87 passed；Windows 本地 29 passed
-- **Cache**：`data/cache/` 在 `.gitignore`，不進 git。換電腦需手動複製或重建
-- **pickle 版本相容性**：backup cache 由較新版 numpy 建立，Windows 本機 Python 3.11 讀不了（`numpy._core` 錯誤），Docker 正常。如需本機跑回測，需升級 numpy
-- **scipy**：P6.3 新增依賴，已加入 `requirements.txt`，Docker image 已重建
-- **`--slippage-bps` CLI 參數**：`run_backtest.py` 預設值 5，`settings.yaml` 設 10。engine.py 會優先讀 yaml
-- **`--label` 不存在**：`run_backtest.py` 沒有 `--label` 參數，用 `--output-dir` 指定輸出目錄
+- **Docker vs Windows**：回測/Walk-Forward/Paper Trading 在 Docker；Dashboard/real_trade 在 Windows
+- **測試**：Docker 147 passed, 0 failed；Windows 16 passed / 13 failed（缺 scipy）
+- **Cache 同步**：`data/cache/` 不進 git。跨電腦需**複製整個資料夾**（不是更新到最新日期）
+- **pickle 版本**：另一台建的 cache 在 Windows Python 3.13 可能讀不了（`StringDtype` 錯誤），Docker 正常
+- **`_DiskCache.load()`**：已改為 log-only，讀取失敗不再刪除 pkl 檔案
+- **scipy**：P6 新增依賴，Docker image 需含 scipy（已重建）
+- **signals.db**：Live/Paper Trading 的 SQLite，跨電腦不需複製
+- **TWSE vs TPEX**：TWSE = 上市（1080 家），TPEX = 上櫃（881 家），FinMind = 兩者整合的第三方 API
+- **benchmark**：目前 `price_only`，Alpha 有 ~2-3%/年高估（需 P4.5 修復）
+- **Skills 路徑**：已改為相對路徑，兩台電腦都能用
 
 ---
 
@@ -207,9 +179,9 @@ docker compose run --rm --entrypoint python portfolio-bot \
 | 文件 | 內容 | 最後更新 |
 |------|------|---------|
 | `Claude-Prompt.md` | 本檔（Claude 交接用） | 2026-04-07 |
-| `Codex-Prompt.md` | Codex 驗證 Prompt（P6 + 整體架構） | 2026-04-06 |
-| `優化紀錄.md` | 完整修改歷程 + 路線圖 + 回測數據 + 雙視角評估 | 2026-04-07 |
+| `Codex-Prompt.md` | Codex 驗證 Prompt（P7 + 整體架構） | 2026-04-07 |
+| `優化紀錄.md` | 完整修改歷程 P0-P7 + 路線圖 + 雙視角評估 | 2026-04-07 |
 | `策略研究.md` | P1-P3 因子研究結論 | 2026-04-01 |
 | `教學進度.md` | 程式碼逐檔解析、觀念教學 | 2026-04-02 |
-| `README.md` | 專案架構、Docker 操作 | 2026-04-02 |
-| `CLAUDE.md` | Claude Code 指引 + Skills 索引 | 2026-04-06 |
+| `README.md` | 專案架構、Docker 操作 | 2026-04-07 |
+| `CLAUDE.md` | Claude Code 指引 + Skills 索引 | 2026-04-07 |

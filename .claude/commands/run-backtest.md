@@ -30,7 +30,7 @@ allowed-tools: ["Bash", "Read", "Glob", "Grep", "TodoWrite"]
 - 若 baseline 不存在，跳過比對步驟
 
 ### Step 3：執行回測
-工作目錄：`c:/Users/a0979/OneDrive/桌面/project/Quantitative Trading`
+工作目錄：專案根目錄（自動偵測，不要寫死路徑）
 
 ```bash
 docker compose run --rm backtest --start <START> --end <END> --benchmark <BENCHMARK>

@@ -94,6 +94,9 @@ class HistoricalUniverse:
             if "stock_id" in self._delisting.columns and "date" in self._delisting.columns:
                 delisted = self._delisting.copy()
                 delisted["date"] = pd.to_datetime(delisted["date"], errors="coerce")
+                # Normalize both sides to naive to avoid tz-aware vs naive comparison
+                if delisted["date"].dt.tz is not None:
+                    delisted["date"] = delisted["date"].dt.tz_localize(None)
                 as_of_ts = pd.Timestamp(as_of).tz_localize(None)
                 # 在 as_of 之前已下市的股票
                 delisted_before = set(
@@ -185,50 +188,19 @@ class HistoricalUniverse:
                     len(working),
                 )
 
-        # --- 市值排序與 size limit ---
+        # --- 流動性排序與 size limit ---
+        # Official strategy spec: rank by trading activity, not market cap.
+        # Momentum strategies perform better in actively-traded stocks.
+        # market_value is kept for monitoring only (stored in snapshot's
+        # market_value field), not used for universe selection.
         size_ranked = False
 
-        # 嘗試 1: 使用 TaiwanStockMarketValue（需付費 API）
-        if source is not None and hasattr(source, "fetch_market_value"):
-            mv_df = source.fetch_market_value()
-            if mv_df is not None and not mv_df.empty and {"stock_id", "market_value"}.issubset(mv_df.columns):
-                mv = mv_df.copy()
-                if "date" in mv.columns:
-                    mv["date"] = pd.to_datetime(mv["date"])
-                    mv = mv.sort_values(["stock_id", "date"])
-                latest_mv = (
-                    mv.dropna(subset=["market_value"])
-                    .groupby("stock_id", as_index=False)
-                    .tail(1)[["stock_id", "market_value"]]
-                )
-                working = working.merge(latest_mv, on="stock_id", how="left")
-                working["market_value"] = pd.to_numeric(working["market_value"], errors="coerce")
-                working = working.sort_values(
-                    ["market_value", "stock_id"], ascending=[False, True]
-                )
-                size_ranked = True
-
-        # 嘗試 1.5: 使用已取得的 TWSE 成交金額排序（免費、無需 OHLCV 快取）
-        # 成交金額 = 當日全市場實際流動性，台積電等大型股必然排前列。
-        if not size_ranked and _twse_turnover:
-            working["_twse_turnover"] = (
-                working["stock_id"].map(_twse_turnover).fillna(0.0)
-            )
-            working = working.sort_values(
-                ["_twse_turnover", "stock_id"], ascending=[False, True]
-            )
-            working = working.drop(columns=["_twse_turnover"])
-            size_ranked = True
-            logger.info(
-                "Size ranking: using TWSE turnover at %s (%d stocks covered)",
-                as_of.date() if hasattr(as_of, "date") else as_of,
-                sum(1 for sid in working["stock_id"] if str(sid) in _twse_turnover),
-            )
-
-        # 嘗試 2: 用 close×volume 20日均值做 size proxy（免費 API 即可）
+        # 排序：用 close×volume 20日均值（與 tw_stock.py 完全一致的正式規格）
+        # P7: 移除 TWSE turnover 排序，統一 live/backtest 路徑，避免微差。
+        # TWSE turnover 仍用於 pre_filter 預篩（上方），但不用於最終排序。
         if not size_ranked and source is not None and hasattr(source, "fetch_ohlcv"):
             logger.info(
-                "market_value API unavailable at %s — computing size proxy from close×volume (cache-only)",
+                "Universe ranking at %s: close×volume size proxy (cache-only)",
                 as_of,
             )
             # 僅使用已有磁碟快取的股票：避免對 2000+ 支股票發出 API 呼叫
@@ -302,7 +274,7 @@ class HistoricalUniverse:
                     "strategy": {},
                     "industry": str(row.get("industry_category", "")),
                     "type": str(row.get("type", "")),
-                    "market_value": float(row["market_value"]) if pd.notna(row.get("market_value")) else None,
+                    "market_value": float(row.get("market_value")) if pd.notna(row.get("market_value")) else None,
                 }
             )
         return result

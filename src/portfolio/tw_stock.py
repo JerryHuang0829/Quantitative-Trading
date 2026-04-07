@@ -201,14 +201,13 @@ def build_tw_stock_universe(config: dict, source, portfolio_config: dict) -> lis
         logger.warning("Auto universe unavailable; falling back to manual symbols")
         return manual_enabled
 
-    market_value = source.fetch_market_value() if hasattr(source, "fetch_market_value") else None
-    candidates = _prepare_auto_universe(stock_info, market_value, portfolio_config)
-    if not candidates:
-        # market_value API 可能需付費；用 close×volume 做 size proxy fallback
-        logger.warning("market_value API failed; attempting size proxy from close×volume")
-        candidates = _prepare_auto_universe_by_size_proxy(
-            stock_info, source, portfolio_config
-        )
+    # Universe selection: rank by trading activity (close × volume).
+    # This is the official strategy spec — not a fallback.
+    # Momentum strategies perform better in actively-traded stocks.
+    # market_value is kept for monitoring/dashboard only, not for universe selection.
+    candidates = _prepare_auto_universe_by_size_proxy(
+        stock_info, source, portfolio_config
+    )
     if not candidates:
         logger.warning("Auto universe returned no candidates; falling back to manual symbols")
         return manual_enabled
@@ -420,95 +419,6 @@ def _analyze_market_proxy(source, default_strategy: dict, portfolio_config: dict
     }
 
 
-def _prepare_auto_universe(stock_info: pd.DataFrame, market_value: pd.DataFrame | None, portfolio_config: dict) -> list[dict]:
-    """Pre-filter the full market into a tradable universe."""
-    working = stock_info.copy()
-    if "stock_id" not in working.columns:
-        return []
-
-    working["stock_id"] = working["stock_id"].astype(str).str.strip()
-    # 保留 4 位股票代碼，以及 00xxxx 類 6 位 ETF 家族代碼。
-    # 這讓 0050 / 006208 的行為和回測路徑一致，同時排除 71xxxx 等權證。
-    working = working[working["stock_id"].str.fullmatch(r"(?:\d{4}|00\d{4})")]
-
-    include_symbols = {
-        str(symbol)
-        for symbol in portfolio_config.get("auto_universe_include_symbols", [])
-    }
-    exclude_symbols = {
-        str(symbol)
-        for symbol in portfolio_config.get("auto_universe_exclude_symbols", [])
-    }
-    if include_symbols:
-        working = working[working["stock_id"].isin(include_symbols)]
-    if exclude_symbols:
-        working = working[~working["stock_id"].isin(exclude_symbols)]
-
-    if portfolio_config.get("exclude_etf", True):
-        working = working[~working["stock_id"].str.startswith("00")]
-
-    allowed_markets = {
-        str(item).lower()
-        for item in portfolio_config.get("auto_universe_markets", ["twse", "tpex"])
-    }
-    if allowed_markets and "type" in working.columns:
-        working = working[
-            working["type"].astype(str).str.lower().apply(
-                lambda value: any(token in value for token in allowed_markets)
-            )
-        ]
-
-    excluded_industries = [
-        str(item).lower()
-        for item in portfolio_config.get("auto_universe_exclude_industries", [])
-    ]
-    if excluded_industries and "industry_category" in working.columns:
-        working = working[
-            ~working["industry_category"].astype(str).str.lower().apply(
-                lambda value: any(keyword in value for keyword in excluded_industries)
-            )
-        ]
-
-    latest_market_value = None
-    if market_value is not None and not market_value.empty and {"stock_id", "market_value"}.issubset(market_value.columns):
-        mv = market_value.copy()
-        if "date" in mv.columns:
-            mv["date"] = pd.to_datetime(mv["date"])
-            mv = mv.sort_values(["stock_id", "date"])
-        latest_market_value = (
-            mv.dropna(subset=["market_value"])
-            .groupby("stock_id", as_index=False)
-            .tail(1)[["stock_id", "market_value"]]
-        )
-        working = working.merge(latest_market_value, on="stock_id", how="left")
-        working["market_value"] = pd.to_numeric(working["market_value"], errors="coerce")
-        working = working.sort_values(["market_value", "stock_id"], ascending=[False, True])
-    else:
-        # P0-1 fix: fail-closed — 沒有市值資料時不應退化為股票代號排序
-        logger.error(
-            "market_value data unavailable — refusing to build auto universe "
-            "with stock_id sort fallback (would change strategy character)"
-        )
-        return []
-
-    limit = int(portfolio_config.get("auto_universe_size", 80) or 0)
-    if limit > 0:
-        working = working.head(limit)
-
-    result = []
-    for _, row in working.iterrows():
-        result.append(
-            {
-                "symbol": str(row["stock_id"]),
-                "name": str(row.get("stock_name", row["stock_id"])),
-                "market_value": _float_or_none(row.get("market_value")),
-                "industry": str(row.get("industry_category", "")),
-                "type": str(row.get("type", "")),
-            }
-        )
-    return result
-
-
 def _prepare_auto_universe_by_size_proxy(
     stock_info: pd.DataFrame, source, portfolio_config: dict
 ) -> list[dict]:
@@ -673,7 +583,8 @@ def _analyze_symbol(
     revenue_yoy = None
     revenue_accel = None
     revenue_raw = None
-    if portfolio_config.get("use_monthly_revenue", True) and hasattr(source, "fetch_month_revenue"):
+    rm_weight = float(portfolio_config.get("score_weights", {}).get("revenue_momentum", 0))
+    if rm_weight > 0 and portfolio_config.get("use_monthly_revenue", True) and hasattr(source, "fetch_month_revenue"):
         revenue_df = source.fetch_month_revenue(
             symbol,
             months=int(portfolio_config.get("monthly_revenue_months", 15)),

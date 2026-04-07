@@ -46,7 +46,7 @@ python scripts/real_trade.py buy 2330 100 580.0
 ```
 main.py                          Live 常駐程式（每 15 分鐘檢查再平衡條件）
 ├── src/portfolio/tw_stock.py    核心選股（1293 行，最大最重要的檔案）
-│   ├── build_tw_stock_universe()    建立候選股池
+│   ├── build_tw_stock_universe()    建立候選股池（close×volume 排序，P7 正式規格）
 │   ├── _analyze_symbol()            單股因子分析
 │   ├── _rank_analyses()             橫截面排名
 │   └── _select_positions()          選股 + 權重分配
@@ -118,7 +118,7 @@ system:
 backtest:                              # P5 E6 新增
   benchmark_lookback_days: 3000
   ohlcv_min_fetch_days: 2000
-  market_value_fetch_days: 2500
+  market_value_fetch_days: 2500        # 監控用，不用於選股排序（P7）
   institutional_fallback_days: 500
   error_rate_threshold: 0.2
   factor_coverage_threshold: 0.3
@@ -144,7 +144,7 @@ portfolio:
 
 ## 測試
 
-87 個測試，分佈在 8 個檔案。Docker 全通過，Windows 本地只有 29 通過（5 個 tw_stock 依賴的檔案需 Docker）。
+135 個測試，分佈在 11 個檔案。Docker 全通過，Windows 本地約 50 通過（部分檔案需 Docker 的 pandas_ta）。
 
 ```bash
 # Windows 可跑的測試
