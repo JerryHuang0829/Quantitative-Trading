@@ -281,6 +281,253 @@ def fetch_twse_issued_capital() -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Full-market daily snapshot (全市場日線快照)
+# ---------------------------------------------------------------------------
+
+_TPEX_DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+
+
+def fetch_twse_daily_all(as_of: datetime) -> dict[str, dict]:
+    """Return {stock_id: {close, volume, turnover}} for ALL TWSE+TPEX stocks.
+
+    Uses TWSE STOCK_DAY_ALL + TPEX OpenAPI to get a single-day snapshot
+    of the entire market in 2 API calls.  Far more efficient than
+    per-stock OHLCV queries for universe ranking.
+
+    Returns empty dict on any unrecoverable error.
+    """
+    result: dict[str, dict] = {}
+
+    # --- TWSE (上市) ---
+    for delta in range(_MAX_RETRY_DAYS):
+        date = _prev_business_day(as_of, delta)
+        date_str = date.strftime("%Y%m%d")
+        try:
+            resp = requests.get(
+                _TWSE_URL,
+                params={"date": date_str, "response": "json"},
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if data.get("stat") != "OK":
+                continue
+            rows = data.get("data") or []
+            if not rows:
+                continue
+
+            # Fields: [0]代號 [1]名稱 [2]成交股數 [3]成交金額 [4]開盤 [5]最高 [6]最低 [7]收盤 [8]漲跌 [9]筆數
+            for row in rows:
+                if len(row) < 8:
+                    continue
+                stock_id = str(row[0]).strip()
+                if not stock_id:
+                    continue
+                try:
+                    close = float(str(row[7]).replace(",", ""))
+                    volume = int(str(row[2]).replace(",", ""))
+                    turnover = float(str(row[3]).replace(",", ""))
+                    result[stock_id] = {
+                        "close": close, "volume": volume, "turnover": turnover,
+                    }
+                except (ValueError, TypeError):
+                    continue
+
+            logger.info(
+                "TWSE daily_all: %d stocks for %s", len(result), date_str,
+            )
+            break
+        except Exception as exc:
+            logger.debug("TWSE STOCK_DAY_ALL exception for %s: %s", date_str, exc)
+
+    # --- TPEX (上櫃) ---
+    try:
+        resp = requests.get(
+            _TPEX_DAILY_QUOTES_URL,
+            timeout=_REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+            verify=False,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tpex_count = 0
+            for row in data:
+                stock_id = str(row.get("SecuritiesCompanyCode", "")).strip()
+                if not stock_id or not stock_id.isdigit():
+                    continue
+                try:
+                    close = float(str(row.get("Close", "0")).replace(",", ""))
+                    volume = int(str(row.get("TradingShares", "0")).replace(",", ""))
+                    turnover = float(str(row.get("TransactionAmount", "0")).replace(",", ""))
+                    if close > 0 and stock_id not in result:  # TWSE wins on duplicates
+                        result[stock_id] = {
+                            "close": close, "volume": volume, "turnover": turnover,
+                        }
+                        tpex_count += 1
+                except (ValueError, TypeError):
+                    continue
+            logger.info("TPEX daily_all: %d stocks", tpex_count)
+    except Exception as exc:
+        logger.debug("TPEX daily quotes failed: %s", exc)
+
+    if result:
+        logger.info("Combined daily_all: %d total stocks", len(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Per-stock historical OHLCV from TWSE/TPEX (個股歷史日線)
+# ---------------------------------------------------------------------------
+
+_TWSE_STOCK_DAY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+_TPEX_STOCK_DAY_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingInfo"
+
+
+def fetch_twse_stock_day(symbol: str, year: int, month: int) -> list[dict]:
+    """Fetch one stock's daily OHLCV for a given month from TWSE.
+
+    Returns list of dicts: {date, open, high, low, close, volume}.
+    Tries TWSE first, then TPEX if not found.
+    Returns empty list on failure.
+    """
+    records: list[dict] = []
+
+    # --- Try TWSE ---
+    date_str = f"{year}{month:02d}01"
+    try:
+        resp = requests.get(
+            _TWSE_STOCK_DAY_URL,
+            params={"date": date_str, "stockNo": symbol, "response": "json"},
+            timeout=_REQUEST_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+            verify=False,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            rows = data.get("data") or []
+            for row in rows:
+                if len(row) < 7:
+                    continue
+                # [0] 日期(民國) [1] 成交股數 [2] 成交金額 [3] 開盤 [4] 最高 [5] 最低 [6] 收盤
+                date_parsed = _parse_roc_date(str(row[0]))
+                if not date_parsed:
+                    continue
+                try:
+                    records.append({
+                        "date": date_parsed,
+                        "open": float(str(row[3]).replace(",", "")),
+                        "high": float(str(row[4]).replace(",", "")),
+                        "low": float(str(row[5]).replace(",", "")),
+                        "close": float(str(row[6]).replace(",", "")),
+                        "volume": int(str(row[1]).replace(",", "")),
+                    })
+                except (ValueError, TypeError):
+                    continue
+            if records:
+                return records
+    except Exception as exc:
+        logger.debug("TWSE STOCK_DAY failed for %s %d-%02d: %s", symbol, year, month, exc)
+
+    # TPEX individual stock history requires HTML scraping (not implemented).
+    # TPEX stocks are covered by fetch_twse_daily_all() for current-day data.
+    # For historical TPEX OHLCV, FinMind remains the primary source.
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# MOPS monthly revenue (公開資訊觀測站月營收)
+# ---------------------------------------------------------------------------
+
+_TWSE_REVENUE_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
+_TPEX_REVENUE_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O"
+
+
+def fetch_twse_monthly_revenue() -> dict[str, dict]:
+    """Fetch the latest monthly revenue for ALL TWSE+TPEX companies.
+
+    Uses TWSE/TPEX OpenData (free, no auth, JSON format).
+    Returns only the **latest month** — use FinMind for historical data.
+
+    Returns {stock_id: {"date": "YYYY-MM-01", "revenue": float_twd}} or empty dict.
+    Revenue unit: 千元 (thousands of TWD) from TWSE, converted to TWD.
+    """
+    result: dict[str, dict] = {}
+
+    for url, label in [(_TWSE_REVENUE_URL, "TWSE"), (_TPEX_REVENUE_URL, "TPEX")]:
+        try:
+            resp = requests.get(
+                url,
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
+            )
+            if resp.status_code != 200:
+                logger.debug("%s revenue OpenData HTTP %d", label, resp.status_code)
+                continue
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                continue
+
+            # Find field keys by substring matching (handles encoding issues)
+            sample = data[0]
+            code_key = ym_key = rev_key = None
+            for k in sample.keys():
+                if "公司代號" in k or "SecuritiesCompanyCode" in k.replace(" ", ""):
+                    code_key = k
+                elif "資料年月" in k or "Year" == k:
+                    ym_key = k
+                elif "當月營收" in k and "累計" not in k:
+                    rev_key = k
+
+            if not code_key or not rev_key:
+                logger.warning("%s revenue: cannot identify field keys", label)
+                continue
+
+            count = 0
+            for row in data:
+                stock_id = str(row.get(code_key, "")).strip()
+                if not stock_id:
+                    continue
+
+                # Parse revenue (unit: 千元 → TWD)
+                try:
+                    rev_raw = float(str(row.get(rev_key, "0")).replace(",", ""))
+                    revenue = rev_raw * 1000  # 千元 → TWD
+                except (ValueError, TypeError):
+                    continue
+
+                if revenue <= 0:
+                    continue
+
+                # Parse date: "11502" → "2026-02-01"
+                ym_str = str(row.get(ym_key, "")).strip()
+                if len(ym_str) >= 5:
+                    roc_year = int(ym_str[:3])
+                    month = int(ym_str[3:5])
+                    date_str = f"{roc_year + 1911:04d}-{month:02d}-01"
+                else:
+                    date_str = None
+
+                if stock_id not in result:  # TWSE wins on duplicates
+                    result[stock_id] = {"date": date_str, "revenue": revenue}
+                    count += 1
+
+            logger.info("%s monthly revenue: %d companies", label, count)
+
+        except Exception as exc:
+            logger.debug("%s revenue OpenData failed: %s", label, exc)
+
+    if result:
+        logger.info("Total monthly revenue fetched: %d companies (TWSE+TPEX)", len(result))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Ex-dividend data (除權息) for total-return price adjustment (P4.5)
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,11 @@ venv/
 data/*.db
 data/signals.db
 data/cache/
+data/cache_new/
+data/cache_old/
+data/cache_rebuild_*.json
+data/cache_rebuild_*.flag
+data/cache_fill_progress.json
 
 # Reports — 保留在 git 供跨機器比對（非唯一真相，換機器後應重跑並比對差異）
 # reports/

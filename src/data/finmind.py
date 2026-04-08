@@ -185,6 +185,39 @@ class FinMindSource(DataSource):
 
     # ----------------------------------------------------------------- OHLCV
 
+    def _fetch_ohlcv_from_twse(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame | None:
+        """Fallback: fetch OHLCV from TWSE per-stock monthly endpoint (TWSE only, not TPEX)."""
+        from .twse_scraper import fetch_twse_stock_day
+
+        all_records: list[dict] = []
+        # Iterate month by month from start to end
+        current = start.replace(day=1)
+        while current <= end:
+            records = fetch_twse_stock_day(symbol, current.year, current.month)
+            all_records.extend(records)
+            # Move to next month
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+            # Rate limit between TWSE calls (avoid being blocked)
+            _time.sleep(0.5)
+
+        if not all_records:
+            return None
+
+        df = pd.DataFrame(all_records)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+        df.index = df.index.tz_localize("UTC")
+        # Rename to match FinMind normalized format
+        df = df[["open", "high", "low", "close", "volume"]].dropna()
+        if df.empty:
+            return None
+        logger.info("TWSE fallback OHLCV for %s: %d days (%s ~ %s)",
+                     symbol, len(df), df.index.min().date(), df.index.max().date())
+        return df
+
     def _api_fetch_ohlcv(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         """Raw API call — tries adjusted price then falls back to unadjusted."""
         df = None
@@ -262,6 +295,13 @@ class FinMindSource(DataSource):
             # First fetch — use wide lookback to cover any backtest period
             wide_start = now - timedelta(days=max(int(limit * 1.8), _WIDE_LOOKBACK_DAYS))
             cached = self._api_fetch_ohlcv(symbol, wide_start.strftime("%Y-%m-%d"), end_str)
+            # TWSE fallback: if FinMind fails, try TWSE per-stock monthly OHLCV.
+            # Do NOT save to disk — TWSE data may differ from FinMind (no ex-dividend adjustment).
+            # Return for this session only; next run retries FinMind.
+            if (cached is None or cached.empty) and not self._backtest_mode:
+                twse_result = self._fetch_ohlcv_from_twse(symbol, wide_start, now)
+                if twse_result is not None and not twse_result.empty:
+                    return twse_result  # Session-only, not persisted
             if cached is None or cached.empty:
                 return None
             changed = True
@@ -398,8 +438,12 @@ class FinMindSource(DataSource):
         changed = False
 
         if cached is not None:
-            # 空 DataFrame = 哨兵（此 symbol 無營收資料）
+            # 空 DataFrame = 哨兵（FinMind 曾失敗）。嘗試 TWSE fallback 但不存 disk。
             if cached.empty:
+                if not self._backtest_mode:
+                    twse_result = self._fetch_revenue_from_twse(symbol)
+                    if twse_result is not None and not twse_result.empty:
+                        return twse_result  # 回傳但不存 disk，讓下次重試 FinMind
                 return None
             if "date" in cached.columns:
                 c_max = pd.Timestamp(cached["date"].max())
@@ -420,9 +464,15 @@ class FinMindSource(DataSource):
             cached = self._api_fetch_revenue(
                 symbol, wide_start.strftime("%Y-%m-%d"), end_str,
             )
+            # TWSE fallback: if FinMind fails, try TWSE OpenData for latest month.
+            # Do NOT save to disk — TWSE only has 1 month, insufficient for YoY.
+            # Next run will retry FinMind for full history.
+            if (cached is None or cached.empty) and not self._backtest_mode:
+                twse_result = self._fetch_revenue_from_twse(symbol)
+                if twse_result is not None and not twse_result.empty:
+                    return twse_result  # Return for this session only, don't persist
             if cached is None or cached.empty:
-                # 存入空 DataFrame 作為哨兵
-                self._disk.save("revenue", pd.DataFrame(), symbol)
+                # 不存哨兵 — 讓下次還能重試 FinMind
                 return None
             changed = True
 
@@ -430,6 +480,27 @@ class FinMindSource(DataSource):
             self._disk.save("revenue", cached, symbol)
 
         return cached
+
+    # In-memory cache for TWSE monthly revenue (one API call covers all stocks)
+    _twse_revenue_cache: dict[str, dict] | None = None
+
+    def _fetch_revenue_from_twse(self, symbol: str) -> pd.DataFrame | None:
+        """Fallback: get latest month revenue from TWSE/TPEX OpenData."""
+        # Cache the full-market fetch (one API call per session)
+        if FinMindSource._twse_revenue_cache is None:
+            from .twse_scraper import fetch_twse_monthly_revenue
+            FinMindSource._twse_revenue_cache = fetch_twse_monthly_revenue()
+
+        entry = FinMindSource._twse_revenue_cache.get(symbol)
+        if not entry or not entry.get("date") or not entry.get("revenue"):
+            return None
+
+        df = pd.DataFrame([{"date": entry["date"], "revenue": entry["revenue"]}])
+        df["date"] = pd.to_datetime(df["date"])
+        df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
+        logger.info("TWSE revenue fallback for %s: %s = %.0f",
+                     symbol, entry["date"], entry["revenue"])
+        return df
 
     def _api_fetch_revenue(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         self._rate_limit()
