@@ -36,7 +36,7 @@
 | P7 選股池正式化 + TWSE 資料完整性 | ✅ |
 | P4.5 Total Return Benchmark（配息） | ✅ |
 | P4.6 Drift-aware 日報酬 | ✅ |
-| **Cache 全新重建** | **⏳ 已清除重來（修正 bug 後）** |
+| **Cache 全新重建** | **⏳ Phase 1-4 完成，Phase 5 待執行** |
 
 ---
 
@@ -52,83 +52,90 @@
 
 | 資料 | 來源 | 備註 |
 |------|------|------|
-| OHLCV（上市 1,074 支） | **TWSE STOCK_DAY** | 100% 交易所原始資料，不用 FinMind |
-| OHLCV（上櫃 881 支） | **FinMind** | TWSE 無上櫃個股歷史 JSON API |
-| Revenue（全市場） | **FinMind** | TWSE 只有最新一期 |
+| OHLCV（上市 1,074 支） | **TWSE STOCK_DAY_ALL** | 全市場日快照，透過 SOCKS5 proxy pool 繞過 HiNetCDN IP ban |
+| OHLCV（上櫃 881 支） | **TPEX 官方 `dailyQuotes`** | 100% 交易所原始資料，不需 proxy |
+| Revenue（全市場 1,952 支） | **FinMind** | 多 token 輪替 + proxy 換 IP 突破 600 req/hr/IP 限制 |
 | stock_info | **TWSE + TPEX OpenAPI** | 不依賴 FinMind |
 | dividends | **TWSE TWT49U** | 已有實作 |
-| market_value | **TWSE 計算** | 股本 × 收盤價 |
+| market_value | **TWSE 計算** | 股本 × 收盤價（Phase 5） |
 | institutional | **不抓** | weight=0% |
 
-**FinMind 只用在：上櫃 OHLCV + 全市場 Revenue。其他全部 TWSE。**
+**FinMind 只用在：Revenue。OHLCV 全部來自交易所原始 API（TWSE + TPEX）。**
 
 ### 重建腳本：`scripts/cache_rebuild.py`
 
 ```
-Phase 0: 建立 data/cache_new/（空目錄）           ⏳ 需重新開始
-Phase 1: stock_info + dividends（TWSE）           ⏳ 需重新開始
-Phase 2: 上市股 OHLCV（TWSE STOCK_DAY）           ⏳ 需重新開始
-Phase 3: 上櫃股 OHLCV（FinMind）                  ⏳ 需重新開始
-Phase 4: Revenue（FinMind）                       ⏳ 需重新開始
-Phase 5: market_value（TWSE 計算）                ⏳ 需重新開始
+Phase 0: 建立 data/cache_new/（空目錄）                        ✅ 完成
+Phase 1: stock_info（1,961）+ dividends（6,699）               ✅ 完成
+Phase 2: 上市股 OHLCV（TWSE STOCK_DAY_ALL，1,074 支 × 1,897 日）✅ 完成（~3 小時，proxy）
+Phase 3: 上櫃股 OHLCV（TPEX 官方，881 支 × 1,897 日）          ✅ 完成（~35 分鐘，直連）
+Phase 4: Revenue（FinMind 多 token，1,952 支）                 ✅ 完成（多 token 輪替）
+Phase 5: market_value（TWSE 計算）                             ⏳ 待執行（< 1 分鐘）
 ```
 
-### 2026-04-08 重置原因
+### 技術實作細節
 
-首次執行時發現兩個問題：
-1. **Phase 2 和 Phase 3 同時跑時 progress 檔互相覆蓋**（已修正：每個 Phase 獨立 progress 檔）
-2. **Phase 3（FinMind）抓的 TPEX pkl 有多餘欄位**（已修正：Phase 3 改為自己標準化到 5 欄）
+#### SOCKS5 Proxy Pool
+- TWSE HiNetCDN 封鎖 Docker 出口 IP → 腳本自動掃描免費 SOCKS5 proxy 列表
+- 掃描 150 個 proxy，取前 3 個可用的建立 pool
+- Phase 2 透過 proxy 存取 TWSE STOCK_DAY_ALL API
 
-已清除所有 `data/cache_new/` 和 progress 檔，從零開始。
+#### Phase 2: STOCK_DAY_ALL（全市場日快照）
+- 改用 STOCK_DAY_ALL 全市場端點（每日一次請求取得所有上市股）
+- 1,897 個交易日（2019-01 ~ 2026-04），每日一個 API call
+- 比逐股逐月快 10 倍以上（~3 小時 vs 原估 ~38 小時）
+- 進度存 `data/cache_rebuild_p2.json`
 
-### Phase 2 詳細
+#### Phase 3: TPEX 官方 dailyQuotes
+- 原計畫用 FinMind，改為 TPEX 官方 API（不需 proxy、不需 token）
+- 1,897 個交易日，每日一次請求
+- ~35 分鐘完成
 
-- 對 1,074 支上市股，逐月從 TWSE 抓 2019-01 ~ 2026-04（84 個月/支）
-- 每次 API 間隔 1.5 秒
-- 預估 ~38 小時（約 3.5 分鐘/支 × 1,074 支）
-- **可中斷恢復**：進度存 `data/cache_rebuild_p2.json`（獨立檔案）
-- Phase 2 和 Phase 3 可以**同時跑**（用不同 API，進度檔獨立）
+#### Phase 4: FinMind 多 Token 策略
+- FinMind 免費版限制：600 requests/hour/**per IP**（非 per token）
+- 策略：4 個 token 搭配不同 IP（T4 直連 + T1/T2/T3 各用不同 SOCKS5 proxy）
+- 順序執行：一個 token 用完（`failed_count >= 100`）再切下一個
+- 透過 `source.loader._FinMindApi__session.proxies.update(px)` 注入 proxy
+- 3 支 DR 股（9103/9110/9136）FinMind 無資料（確認 API 回傳空），屬正常
 
-### 查進度
+### 資料驗證結果
+
+| 項目 | 結果 |
+|------|------|
+| Phase 1 stock_info | 1,961 支（TWSE 1,080 + TPEX 881） |
+| Phase 1 dividends | 6,699 筆 |
+| Phase 2 TWSE OHLCV | 1,074 支 pkl，1,897 日 |
+| Phase 3 TPEX OHLCV | 881 支 pkl，1,897 日，0 NaN，0 OHLC 異常，0 重複日期 |
+| Phase 4 Revenue | 1,952 支 pkl |
+| Top-80 Revenue 覆蓋率 | 100% |
+| Top-200 Revenue 覆蓋率 | 100% |
+| Top-500 Revenue 覆蓋率 | 100% |
+| Revenue 不足 12 個月 | 61 支（全為 2025+ IPO，資料完整） |
+| Revenue 無資料 | 3 支 DR 股（9103/9110/9136，FinMind 無此類資料） |
+
+### 剩餘步驟
 
 ```bash
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --status
-```
+# Phase 5（market_value 計算，< 1 分鐘）
+docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --phase 5
 
-### 如何接續
-
-```bash
 # 查進度
 docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --status
-
-# 接續 Phase 2（自動從上次位置開始）
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --phase 2
-
-# 跑 Phase 3（上櫃，可跟 Phase 2 分開跑）
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --phase 3
-
-# 跑 Phase 4（Revenue）
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --phase 4
-
-# 跑 Phase 5（market_value，最後跑）
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_rebuild.py --phase 5
 ```
-
-### 跨電腦接續
-
-如果要換電腦繼續：
-1. 複製 `data/cache_new/` + `data/cache_rebuild_progress.json` 到另一台
-2. `git pull` 拿最新程式碼
-3. 跑同樣的 `--phase N` 指令
 
 ### 完成後切換
 
 ```bash
+# Phase 5 完成後
 mv data/cache data/cache_old       # 舊 cache 保留
 mv data/cache_new data/cache       # 新 cache 上線
-```
 
-然後跑 `cache_health.py` 驗證，再跑回測確認結果合理。
+# 驗證
+docker compose run --rm --entrypoint python portfolio-bot scripts/cache_health.py
+
+# 回測比對（基準：4Y Sharpe ~0.90）
+docker compose run --rm backtest --start 2022-01-01 --end 2024-12-31 --benchmark 0050
+```
 
 ---
 
@@ -153,8 +160,10 @@ mv data/cache_new data/cache       # 新 cache 上線
 | `scripts/real_trade.py` | 小額實盤追蹤 |
 | `tests/` | 161 個測試（14 個測試檔） |
 | `data/cache/` | 現有 cache（舊，重建完成後改名 cache_old） |
-| `data/cache_new/` | **新 cache（正在建立中）** |
-| `data/cache_rebuild_progress.json` | 重建進度檔 |
+| `data/cache_new/` | **新 cache（Phase 1-4 完成，Phase 5 待執行）** |
+| `data/cache_rebuild_p2.json` | Phase 2 進度檔 |
+| `data/cache_rebuild_p3.json` | Phase 3 進度檔 |
+| `data/cache_rebuild_p4.json` | Phase 4 進度檔 |
 
 ---
 
@@ -162,12 +171,10 @@ mv data/cache_new data/cache       # 新 cache 上線
 
 ### 最高優先：完成 Cache 重建
 
-1. Phase 2 跑完（上市 OHLCV，~38 小時）
-2. Phase 3（上櫃 OHLCV FinMind，~1.5 小時）
-3. Phase 4（Revenue FinMind，~3.3 小時）
-4. Phase 5（market_value 計算，< 1 分鐘）
-5. 驗證：cache_health + 回測比對
-6. 切換：rename
+1. ~~Phase 1-4~~ ✅ 已完成
+2. Phase 5（market_value 計算，< 1 分鐘）
+3. 驗證：cache_health + 回測比對
+4. 切換：rename
 
 ### 之後：Paper Trading
 
@@ -197,18 +204,23 @@ mv data/cache_new data/cache       # 新 cache 上線
 
 ## 六. 技術備註
 
-### TWSE Fallback 架構
+### Cache 重建後的資料來源架構
 
 ```
-OHLCV:    FinMind → TWSE STOCK_DAY（不存 disk，避免混合來源）
-Revenue:  FinMind → TWSE OpenData（不存 disk，只有 1 個月不夠 YoY）
+OHLCV 上市: TWSE STOCK_DAY_ALL（cache_new，100% 交易所原始）
+OHLCV 上櫃: TPEX dailyQuotes（cache_new，100% 交易所原始）
+Revenue:    FinMind（cache_new，多 token + proxy）
+Live 補資料: FinMind → TWSE/TPEX fallback（不存 disk，避免混合來源）
 ```
 
-TWSE fallback 回傳的資料只在當次 session 使用，不存進 disk cache。這確保 cache 永遠是單一來源（上市=TWSE，上櫃=FinMind）。
+新 cache 的 OHLCV **完全不依賴 FinMind**，解決了 FinMind 免費版 971 支股票抓不到的策略盲區。
 
-### Cache 重建的資料一致性
+### FinMind 多 Token 架構
 
-FinMind 免費版的 OHLCV = TWSE 原始價格（`TaiwanStockPriceAdj` 需付費，免費版 fallback 到 `TaiwanStockPrice`）。所以 TWSE 抓的資料跟 FinMind 免費版完全一致。
+4 個帳號 token，FinMind 以 IP 為單位限流（600 req/hr/IP）：
+- `FINMIND_TOKEN4`：直連（無 proxy）
+- `FINMIND_TOKEN` / `TOKEN2` / `TOKEN3`：各搭配不同 SOCKS5 proxy IP
+- 順序執行：一個 token 的 IP 用完（連續 100 次失敗）再切下一個
 
 ### 其他
 
