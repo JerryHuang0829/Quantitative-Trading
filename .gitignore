@@ -24,6 +24,15 @@ data/cache_fill_progress.json
 # Reports — 保留在 git 供跨機器比對（非唯一真相，換機器後應重跑並比對差異）
 # reports/
 
+# Internal docs（本機保留，不公開）
+Claude-Prompt.md
+Codex-Prompt.md
+CLAUDE.md
+教學進度.md
+優化紀錄.md
+策略研究.md
+.claude/
+
 # IDE
 .vscode/
 .idea/
