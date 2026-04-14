@@ -1,9 +1,31 @@
-# Codex 獨立驗證 Prompt — 全架構 + P7 + P4.5/P4.6 + 資料完整性
+# Codex 獨立驗證 Prompt
 
-最後更新：2026-04-08
-用途：對整個專案做完整的獨立驗證。涵蓋架構、選股邏輯、回測引擎、資料層、TWSE fallback、配息調整、drift-aware。
+最後更新：2026-04-13
+請用中文回覆。
 
-**⚠️ 重要：請完全獨立驗證，不要依賴 Claude 的任何結論或數字。你需要自己讀程式碼、自己算數學、自己跑測試、自己判斷。Claude 可能犯錯、可能遺漏、可能自圓其說。你的工作是找到 Claude 沒發現的問題。**
+---
+
+## 你的角色
+
+你是這個量化交易專案的**獨立審計員（Independent Auditor）**。
+
+**你的定位**：
+- **不是開發者** — 你不寫功能、不做修改、不實作需求
+- **不是 Claude 的助手** — 你跟 Claude 是對等的，Claude 的結論對你沒有權威性
+- **你是找錯的人** — 專門發現 Claude 沒看到的 bug、邏輯漏洞、資料問題、設計缺陷
+
+**你的工作方式**：
+1. **自己讀程式碼** — 不要用 Claude 提供的行號或函式描述，自己 grep 搜尋
+2. **自己算數學** — Claude 說 Sharpe = 0.90，你跑一次看是不是 0.90
+3. **自己驗資料** — Claude 說資料正確，你打開 pkl 檔看裡面的數字對不對
+4. **質疑一切** — Claude 說「已修復」的東西可能沒修好，說「正常」的行為可能有 bug
+
+**輸出格式**：
+- 每個發現標記嚴重度：P0（資料損壞/look-ahead）> P1（計算錯誤）> P2（設計缺陷）> P3（改善建議）
+- 明確指出：檔案路徑、函式名、問題描述、影響範圍、建議修復方式
+- 如果 Claude 聲稱的數字跟你跑出來的不同，列出雙方數字和差異原因
+
+**⚠️ Claude 可能犯錯、可能遺漏、可能自圓其說。你的價值在於找到 Claude 沒發現的問題。**
 
 ---
 
@@ -19,309 +41,302 @@
 
 ---
 
-## 二、完整架構驗證
+## 二、策略邏輯驗證
 
-### 2.1 選股池一致性（P7 核心）
+### 2.1 選股池一致性（P7）
 
-**Live 路徑**（`tw_stock.py:build_tw_stock_universe`）和**回測路徑**（`universe.py:get_universe_at`）必須用相同排序：
-
-驗證：
 1. `tw_stock.py` 是否只呼叫 `_prepare_auto_universe_by_size_proxy()`？不呼叫 `fetch_market_value()`？
-2. `_prepare_auto_universe()` 函式是否已刪除？（P7.13）
-3. `universe.py` 是否只用 close×volume 排序？不用 market_value 或 TWSE turnover？
-4. 兩條路徑在相同資料下是否選出相同候選股？
+2. `_prepare_auto_universe()` 函式是否已刪除？
+3. `universe.py` 是否只用 close×volume 排序？
+4. Live 和 Backtest 兩條路徑在相同資料下是否選出相同候選股？
 
 ### 2.2 Point-in-time 完整性
 
 1. `_DataSlicer`（engine.py）是否正確截斷所有資料到 `as_of` 日期？
-2. `fetch_ohlcv()` / `fetch_institutional()` / `fetch_month_revenue()` 都有 `_truncate_by_date_col()` 嗎？
-3. Revenue 有 35 天 lag 保護嗎？（tw_stock.py `_monthly_revenue_momentum()`）
-4. 除息資料的 look-ahead 防護：`ex_date <= end_date` cutoff（engine.py）
+2. Revenue 有 35 天 lag 保護嗎？（tw_stock.py `_monthly_revenue_momentum()`）
+3. 除息資料的 look-ahead 防護：`ex_date <= end_date` cutoff（engine.py）
 
 ### 2.3 因子跳過邏輯
 
-1. `institutional_flow` weight=0 → 完全不打 API？（tw_stock.py）
-2. `quality` weight=0 → 完全不打 API？
-3. `revenue_momentum` weight=0 → 也跳過？（P7.14 新增 `rm_weight > 0` guard）
-4. 確認 `_rank_analyses()` 中 weight <= 0 因子不參與排名
+1. `institutional_flow` weight=0 → 完全不打 API？
+2. `revenue_momentum` weight=0 → 也跳過？
+3. `_rank_analyses()` 中 weight <= 0 因子不參與排名？
 
-### 2.4 交易成本模型
+### 2.4 交易成本與其他
 
-1. `turnover` 是 one-way（engine.py）
-2. `round_trip_cost` = 0.0047（手續費×2 + 證交稅）
-3. `slippage_bps` 從 yaml 讀取（預設 10）
-4. `slippage_cost = turnover * 2 * (slippage_bps / 10000)`
-
-### 2.5 Stock Split 處理
-
-1. `adjust_splits()`（metrics.py）：-40% 門檻、+100% 門檻
-2. 不會誤判台股 ±10% 漲跌停
-3. 處理順序：newest-to-oldest
-
-### 2.6 Market Regime
-
-1. `detect_regime()`（regime.py）：ADX + SMA 判斷 risk_on/caution/risk_off
-2. 對應曝險：96%/70%/35%
+- `round_trip_cost` = 0.0047、`slippage_bps` 預設 10
+- `adjust_splits()`：-40% / +100% 門檻
+- `detect_regime()`：ADX + SMA → 96%/70%/35%
 
 ---
 
-## 三、P4.5 配息調整驗證
+## 三、配息與日報酬驗證
 
-### 3.1 TWSE 除息爬蟲（`twse_scraper.py`：`fetch_twse_dividends()`）
+### 3.1 P4.5 配息調整
 
-1. TWT49U 端點：正確解析「息」vs「權」？
-2. `div_type != "息"` 精確匹配 — 排除「權息」（P4.5 bug fix #5）
-3. `cash_dividend = close_before - ref_price`
-4. ROC 日期解析 `_parse_roc_date()` 是否 robust？
+1. `fetch_twse_dividends()`：TWT49U 端點，`div_type != "息"` 精確匹配
+2. `adjust_dividends()`：`factor = 1 - cash_div / close_before`（scale-invariant）
+3. 處理順序：oldest-to-newest
+4. Benchmark 配息年份範圍涵蓋 3000 天 lookback
 
-### 3.2 配息調整公式（`metrics.py`：`adjust_dividends()`）
+### 3.2 P4.6 Drift-aware
 
-1. Scale-invariant：`factor = 1 - cash_div / close_before`
-2. Fallback：`factor = price_on_ex / (price_on_ex + cash_div)`
-3. 處理順序：oldest-to-newest（配息是固定金額，非比率）
-4. Guard conditions：empty、no match、ex_date not in index、factor 範圍
-5. 0050 的 1:4 split + 配息是否正確處理？
-
-### 3.3 Cache 層（`finmind.py`：`fetch_dividends()`）
-
-1. 用 `pickle.dump/load`（不是 `_DiskCache`），因為 `list[dict]` 不是 DataFrame
-2. TTL 7 天
-3. `backtest_mode=True` → 直接回傳 cache
-
-### 3.4 引擎整合（`engine.py`）
-
-1. look-ahead 防護：`ex_date <= end_date`
-2. 順序：先 `adjust_splits` 再 `adjust_dividends`
-3. `benchmark_type` 從 `price_only` 覆蓋為 `total_return`
-4. Benchmark 配息年份範圍涵蓋 3000 天 lookback（P4.5 bug fix #6）
+1. `_compute_daily_returns()`：初始 dollar value = 目標權重，每日隨股價漂移
+2. 手算驗證：2 支股票各 50%，2 天（A +10%/-5%，B -3%/+8%）→ Day2 drift = 1.09%
 
 ---
 
-## 四、P4.6 Drift-aware 日報酬驗證
+## 四、Cache 重建驗證（2026-04-10 重點）
 
-### 4.1 數學公式（`engine.py`：`_compute_daily_returns()`）
+### 4.1 背景與已知問題
 
-1. `values = w.copy()` → 初始 dollar value = 目標權重
-2. `cash = 1.0 - w_sum` → 未投資部位
-3. 每日：`values = values * (1.0 + day_rets)`
-4. 日報酬：`port_ret = (values.sum() + cash) / total_before - 1.0`
+- 2026-04-08 首次重建失敗：`STOCK_DAY_ALL` **不支援歷史查詢**（永遠回最新一天），1,074 支上市股全部損壞
+- 2026-04-09 改用 `STOCK_DAY`（per-stock per-month）重建
+- Phase 2 執行中 TWSE 偶爾回 HTTP 307（rate limit），導致部分月份遺漏
+- 已建立 `scripts/validate_cache.py` 偵測並修復缺漏
+- 2026-04-10：交易日曆盲點修復 + cache_fill.py 全面改寫（見 4.5）
 
-### 4.2 手算驗證
+### 4.2 資料來源與格式
 
-2 支股票各 50%，持有 2 天：A +10%/-5%，B -3%/+8%
-- Day 1：drift = fixed = 3.5%
-- Day 2：drift = 1.09%，fixed = 1.5%（差異 0.41%）
-- **請自行驗算。**
+| 資料 | 來源 | 格式 | 數量 |
+|------|------|------|------|
+| OHLCV（上市） | TWSE `STOCK_DAY` per-stock per-month | DataFrame, UTC index, 5 cols | 1,077/1,081（99.6%）✅（4 支疑似 DR/停牌） |
+| OHLCV（上櫃） | FinMind `TaiwanStockPrice` | DataFrame, UTC index, 5 cols | 881/881 ✅ |
+| Revenue | FinMind `TaiwanStockMonthRevenue` | DataFrame, 含 date/revenue 欄位 | 1,953 files, 1,891 good（3 DR 無資料）+ 62 新增 |
+| stock_info | TWSE + TPEX OpenAPI | DataFrame, 含 stock_id/type/industry | 1,962 筆 |
+| dividends | TWSE `TWT49U` | list[dict], 含 stock_id/ex_date/cash_dividend | 6,699 筆 |
+
+### 4.3 `validate_cache.py` 設計審查
+
+Claude 設計的驗證機制，**請找出盲點**：
+
+**交易日曆 consensus（兩階段，2026-04-10 修復）**：
+- Phase 1：從 10 支參考股票取聯集，>=3 支有資料 → 認定為交易日（覆蓋歷史）
+- Phase 2（新增）：掃全部 pkl tail(10)，取 > cal.last_day 的日期，>=3 票 → 延伸日曆（修復近期缺漏偵測不到）
+- 問題：參考股票本身有缺天時，consensus 能否正確補回？
+- 問題：10 支夠不夠？閾值 3 是否合理？
+- 問題：Phase 2 掃全部 pkl 開銷如何？1,500 支 × tail(10) 是否可接受？
+
+**缺漏偵測**：
+- 比對每支股票「第一天到最後一天」之間的所有交易日
+- 問題：第一天本身可能就是錯的（rate limit 跳過前幾天）
+- 問題：TPEX 缺天可能是停牌，不是 bug — 如何區分？
+
+**修復邏輯**：
+- 重新呼叫 TWSE API 抓缺失月份，透過 proxy 輪替避開 IP 封鎖
+- 問題：修復後格式是否與原始 Phase 2 一致？
+- 問題：TWSE 回傳天數 < 交易日曆天數時，是誰的問題？
+
+### 4.4 `cache_rebuild.py` 新增功能
+
+1. **`TokenRotator`**：FinMind multi-token + proxy 輪替
+   - Token1+Direct → Token2+Proxy-A → Token3+Proxy-B
+   - 每 token 580 calls 後切換
+   - 請驗證：quota 偵測是否可靠？
+
+2. **`REQUIRED_ETFS`**：0050/0051/0052/0053/0055/0056
+   - 不在 stock_info 中（TWSE OpenAPI 不含 ETF）
+   - 請驗證：是否影響 `universe.py` 或 `tw_stock.py`？
+
+3. **`fetch_twse_stock_day` retry**：
+   - HTTP 307/403 → 等 30/60/120 秒 → 重試 3 次
+   - 請驗證：等待時間是否合理？
+
+### 4.5 2026-04-10 重大修改（請驗證是否正確）
+
+**修改一：`validate_cache.py` `build_calendar()` 兩階段延伸**
+
+- 問題：10 支參考股票最後日期均為 4/8，導致 4/9、4/10 的缺漏偵測不到
+- 修復：Phase 2 掃全部 pkl tail(10)，votes >= 3 → 加入日曆
+- 驗證點：4/9 有 500+ 票、4/10 有 24 票，是否合理（24 支股票已有 4/10 資料）？
+
+**修改二：`twse_scraper.py` `fetch_twse_daily_all()` 擴充 OHLCV**
+
+- 問題：原函式只回傳 `{close, volume, turnover}`，缺少 open/high/low
+- 修復：從 row[4]/[5]/[6] 提取，用 `_safe_price()` 處理 "--" 無效值（fallback = close）
+- 驗證點：
+  ```python
+  from src.data.twse_scraper import fetch_twse_daily_all
+  r = fetch_twse_daily_all(__import__('datetime').datetime.now())
+  print(list(r.items())[:2])
+  # 應有 open/high/low/close/volume/turnover 6 個欄位
+  ```
+
+**修改三：`cache_fill.py` 全面改寫**
+
+- 新增 `--daily` 模式：呼叫 `fetch_twse_daily_all()` 取全市場快照（2 requests），只更新已有 pkl 的 TWSE 股票
+- 新增 `--revenue-only` 模式：強制更新 Revenue（不管是否在 1-15 號）
+- 修復 `--refresh-all` progress 每日失效：原本 Day 1 把 `ohlcv_done` 填滿，Day 2 空跑；修復：`--refresh-all` 不讀 progress，每次全量 + 重置 progress
+- Revenue 月份限制：非 `--revenue-only` 時，只在每月 1-15 號執行 Revenue 更新（節省 FinMind 額度）
+- 驗證點：
+  ```bash
+  python scripts/cache_fill.py --daily
+  # 預期 log：STOCK_DAY_ALL update: N updated, M skipped
+  # N 應約等於 TWSE 上市股數（~1,081）
+  ```
+
+### 4.7 2026-04-13 validate_cache.py 盲點修復（請驗證）
+
+Claude 發現並修復了 8 個盲點，**請逐一驗證邏輯是否正確、是否還有其他漏洞**：
+
+**盲點 1：ProxyPool 效率**
+- 修復前：max_per_ip=15，測試 25 個 proxy 保留 5 個 → 5×15=75 calls/批 → 重複抓 proxy 104 次
+- 修復後：max_per_ip=30，測試 100 個保留 20 個 → 20×30=600/批 → 13 次
+- 驗證點：`_fetch()` 中 `cands[:100]`、`if len(ok) >= 20: break`、`__init__` 中 `max_per_ip=30`
+
+**盲點 2：close≤0 不進 fix list**
+- 修復：`validate_ohlcv()` 在偵測到 `close <= 0` 時，對每個受影響月份加入 `issue_type="close_zero"` 的 fix entry
+- 驗證點：entry 的 `actual_days` 設為 0，避免與已有 issue 重複的邏輯是否正確？
+
+**盲點 3+5：fix_twse 無重試 + 無 resume**
+- 新增 `_fetch_with_retry(sym, yr, mo, pool, retries=3)` — 每次失敗後 `pool.force_rotate(); pool.rotate(); sleep(3)`
+- 新增 `fix_twse_progress.json` — 每支股票處理完後儲存，重啟時跳過已完成股票
+- 驗證點：進度檔存的是 stock_id list；`by_stock` 和 `create_list` 都正確過濾 `progress_done`？
+
+**盲點 4：DR stocks 跳過**
+- 偵測條件：`si_df["industry_category"].astype(str) == "91"`
+- 驗證點：DR stocks 只影響 Part 2（create new pkl），Part 1（patch existing）也應跳過嗎？
+
+**盲點 6：fix_tpex 完整改寫**
+- 新增 `FinMindRotator`：Token1+Direct → Token2+Proxy → Token3+Proxy，每 550 calls 輪替
+- 現在接受 fix_entries（close_zero/partial/missing），一次 FinMind call 覆蓋該股所有受影響月份
+- 驗證點：FinMindRotator 的 `_fetch_proxy()` 只測 `api.ipify.org`，而非 FinMind 本身 — 代理可能可連 ipify 但不能連 FinMind？
+
+**盲點 7：TPEX end_str = day-28**
+- 修復前：`f"{max_yr}-{max_mo:02d}-28"` — 3 月底 29/30/31 日不會被 fetch
+- 修復後：`datetime.now().strftime("%Y-%m-%d")`
+- 驗證點：若 max_month 就是當月（in-progress），從月初抓到今天是否足夠？
+
+**盲點 8：TPEX/TWSE patch 後 close>0 過濾**
+- fix_twse 和 fix_tpex 在 write 前均加 `df = df[df["close"] > 0]`
+- 驗證點：若過濾掉過多行（例如停牌股的 close=0 是合法資料？），是否會造成月份看起來更短？
+
+**新增測試缺口**：
+- `_fetch_with_retry()` 失敗路徑（3 次全 empty）無測試
+- `fix_twse_progress.json` resume 邏輯無測試
+- `FinMindRotator.rotate()` token 耗盡後等待 65 min 邏輯無測試
+- DR stocks 跳過邏輯無測試
+- `validate_ohlcv` close_zero issue entry 生成邏輯無測試
 
 ---
 
-## 五、P7 選股池正式化 + 資料完整性
+### 4.6 架構設計問題（請提出改善建議）
 
-### 5.1 選股池（P7.1-P7.15）
-
-1. `_prepare_auto_universe()` 已刪除（P7.13）
-2. `preload_reference_data()` 已改為 `pass`（P7.15）
-3. `_DiskCache.load()` 改為 log-only 不刪檔（P7.10）
-4. `revenue_momentum` weight=0 時跳過 API（P7.14）
-5. Live/Backtest 都用 close×volume（P7.9 統一）
-
-### 5.2 TWSE 資料來源（P7.16-P7.22）
-
-| 函式 | 端點 | 驗證 |
-|------|------|------|
-| `fetch_twse_daily_all(as_of)` | STOCK_DAY_ALL + TPEX OpenAPI | 回傳 > 2,500 支？含 close/volume/turnover？ |
-| `fetch_twse_stock_day(symbol, year, month)` | TWSE STOCK_DAY | OHLCV 格式正確？ROC 日期解析？ |
-| `fetch_twse_monthly_revenue()` | TWSE t187ap05_L + TPEX mopsfin_t187ap05_O | > 1,900 家？單位千元→TWD？ |
-| `fetch_twse_issued_capital()` | TWSE t187ap03_L + TPEX mopsfin_t187ap03_O | > 1,900 家？TWSE 中文 + TPEX 英文欄位？ |
-
-### 5.3 Fallback 整合（`finmind.py`）
-
-1. **OHLCV fallback**：`fetch_ohlcv()` → FinMind 失敗 → `_fetch_ohlcv_from_twse()` → 逐月補
-   - 只在 `not backtest_mode` 時觸發
-   - **不存 disk cache**（只回傳當次使用）— 避免混入非 FinMind 資料影響回測
-   - DataFrame 格式與 FinMind 一致（UTC index）
-2. **Revenue fallback**：`fetch_month_revenue()` → FinMind 失敗 → `_fetch_revenue_from_twse()`
-   - **不存 disk cache**（只回傳，不 persist）— 避免 1 個月陷阱
-   - sentinel（空 DataFrame）也不存 — 讓下次重試 FinMind
-3. **market_value**：TWSE 計算（監控用，不影響選股）
-
-### 5.4 Cache 品質控制
-
-1. **`cache_fill.py --refresh-all`**：
-   - OHLCV：檢查 max_date > stale_cutoff 才記 done（不被 API 失敗欺騙）
-   - Revenue：需 >= 12 個月才記 done（不被 TWSE 1 個月 fallback 欺騙）
-   - 20 次連續失敗自動停止
-   - 進度可中斷恢復
-2. **`cache_health.py`**：
-   - 用 OHLCV cache 20 日均值排名（與策略一致）
-   - 不用 TWSE daily_all（避免假警報）
+1. **TWSE rate limit**：1.5s 間隔仍被 307 擋。更好的策略？（指數退避、session 維持、多 User-Agent）
+2. **資料來源混用**：上市 TWSE + 上櫃 FinMind。TPEX `dailySummary` 只有 close/volume，是否影響 OHLCV 完整性？
+3. **pickle 格式**：跨 Python/pandas 版本不相容（已發生）。改 parquet？
+4. **驗證時機**：應在每支股票完成後就驗，還是全部跑完再驗？
+5. **免費 proxy**：成功率 ~30%，是否值得投資付費方案？
+6. **`_safe_price()` fallback**：open/high/low 解析失敗時 fallback = close，是否會產生 OHLCV 邏輯矛盾（如 low > close）？
 
 ---
 
-## 六、測試覆蓋驗證
+## 五、測試覆蓋
 
-| 測試檔 | 數量 | 覆蓋 |
-|--------|------|------|
-| test_metrics.py | 27 | Sharpe/MDD/Alpha/CVaR/Tail Ratio + known-answer + split adjust |
-| test_engine_integration.py | 17 | 端到端回測（FakeSource） |
-| test_finmind.py | 17 | DiskCache + CSV fallback + stock_info |
-| test_data_slicer.py | 15 | point-in-time 截斷 |
-| test_rebalance_dates.py | 14 | 月曆 + 交易日對齊 |
-| test_selection.py | 12 | 選股門檻 + hold buffer + 產業限制 |
-| test_p7_universe.py | 12 | TWSE 解析 + 市值計算 + size proxy 路徑 |
-| test_ranking.py | 10 | 因子排名 + 百分位 |
-| test_vol_weighting.py | 9 | 波動率加權 |
-| test_dividends.py | 9 | 配息調整 + split-safe + TWSE 日期 |
-| test_zero_weight_skip.py | 8 | weight=0 跳過邏輯 |
-| test_drift_aware.py | 5 | drift-aware known-answer |
-| test_degradation.py | 4 | data_degraded 判定 |
-| test_universe.py | 2 | stock_id 缺失 edge case |
-| **合計** | **161** | |
+161 個測試，14 個檔案。
 
 **缺失的測試**（Codex 應指出）：
-- `fetch_twse_daily_all()` 無測試
-- `fetch_twse_stock_day()` 無測試
-- `fetch_twse_monthly_revenue()` 無測試
-- `_fetch_ohlcv_from_twse()` 無測試
-- `cache_fill.py` 的 stale 檢測邏輯無測試
-- `cache_health.py` 無測試
+- `fetch_twse_daily_all()` 新增了 open/high/low，但無測試（含 "--" fallback 邏輯）
+- `fetch_twse_stock_day()` / `fetch_twse_monthly_revenue()` 無測試
+- `cache_fill.py` `--daily` 模式、`_daily_ohlcv_update()` 無測試
+- `cache_fill.py` stale 檢測 / `cache_health.py` / `validate_cache.py` 無測試
+- `build_calendar()` Phase 2 延伸邏輯無測試
+- `_fetch_with_retry()` 失敗路徑（3 次全 empty）無測試（2026-04-13 新增）
+- `fix_twse_progress.json` resume 邏輯無測試（2026-04-13 新增）
+- `FinMindRotator.rotate()` token 耗盡後等待邏輯無測試（2026-04-13 新增）
+- `validate_ohlcv` close_zero issue entry 生成邏輯無測試（2026-04-13 新增）
 
 ---
 
-## 七、執行驗證步驟
+## 六、執行驗證
 
 ```bash
-# 1. 全部測試（Docker）
-docker compose build portfolio-bot
+# 1. 單元測試
 docker compose run --rm --entrypoint python portfolio-bot -m pytest tests/ -v
-# 預期：161 passed, 0 failed
 
-# 2. 選股池驗證
-docker compose run --rm --entrypoint python portfolio-bot -c "
-import inspect
-from src.portfolio.tw_stock import build_tw_stock_universe
-source = inspect.getsource(build_tw_stock_universe)
-assert 'fetch_market_value' not in source, 'Still calls fetch_market_value!'
-assert '_prepare_auto_universe_by_size_proxy' in source
-from src.portfolio import tw_stock
-assert not hasattr(tw_stock, '_prepare_auto_universe'), 'Dead code still exists!'
-print('PASS: Universe uses size proxy only')
+# 2. Cache 驗證（本機可跑）
+# bash:
+PYTHONPATH=. python scripts/validate_cache.py
+# PowerShell:
+# $env:PYTHONPATH='.'; python scripts/validate_cache.py
+
+# 2b. 每日 OHLCV 更新（15:00 後執行，2 requests，不消耗 FinMind）
+PYTHONPATH=. python scripts/cache_fill.py --daily
+# 每月 1-15 號加跑 Revenue
+PYTHONPATH=. python scripts/cache_fill.py --revenue-only
+
+# 3. OHLCV 資料品質
+python -c "
+import pandas as pd, pathlib
+for sym in ['2330','2317','2454','2881','0050']:
+    df = pd.read_pickle(pathlib.Path('data/cache/ohlcv') / f'{sym}.pkl')
+    unique = len(df['close'].unique())
+    print(f'{sym}: {len(df)} rows, unique={unique}, [{df[\"close\"].min():.1f}~{df[\"close\"].max():.1f}]')
 "
 
-# 3. TWSE fallback 驗證
-docker compose run --rm --entrypoint python portfolio-bot -c "
-from src.data.twse_scraper import fetch_twse_daily_all, fetch_twse_monthly_revenue
-from datetime import datetime
-daily = fetch_twse_daily_all(datetime.now())
-assert len(daily) > 2500, f'Expected >2500, got {len(daily)}'
-tsmc = daily.get('2330', {})
-assert tsmc.get('close', 0) > 0, 'TSMC close missing!'
-print(f'PASS: daily_all = {len(daily)} stocks')
-
-rev = fetch_twse_monthly_revenue()
-assert len(rev) > 1900, f'Expected >1900, got {len(rev)}'
-print(f'PASS: monthly_revenue = {len(rev)} companies')
+# 4. Dividends 數值
+python -c "
+import pickle
+with open('data/cache/dividends/_global.pkl','rb') as f:
+    divs = pickle.load(f)
+d2330 = [d for d in divs if d['stock_id']=='2330']
+for d in d2330[-3:]: print(d)
+# 台積電 2026 Q1 除息應是 6.01 元
 "
 
-# 4. Revenue fallback 不存 disk 驗證
-docker compose run --rm --entrypoint python portfolio-bot -c "
-import inspect
-from src.data.finmind import FinMindSource
-src = inspect.getsource(FinMindSource.fetch_month_revenue)
-# TWSE fallback 不應該有 disk.save
-assert 'return twse_result  # 回傳但不存 disk' in src or 'return twse_result  # Return for this session only' in src, \
-    'TWSE revenue fallback might be saving to disk!'
-print('PASS: TWSE revenue fallback does not persist to disk')
-"
-
-# 5. _DiskCache 不刪檔驗證
-docker compose run --rm --entrypoint python portfolio-bot -c "
-import inspect
-from src.data.finmind import _DiskCache
-src = inspect.getsource(_DiskCache.load)
-assert 'unlink' not in src, '_DiskCache.load still deletes files!'
-assert 'warning' in src.lower() or 'Warning' in src, 'Should log warning on failure'
-print('PASS: _DiskCache.load is log-only, no file deletion')
-"
-
-# 6. cache_health 報告
-docker compose run --rm --entrypoint python portfolio-bot scripts/cache_health.py
-
-# 7. Drift-aware 手算驗證
-docker compose run --rm --entrypoint python portfolio-bot -c "
+# 5. Revenue 數值
+python -c "
 import pandas as pd
-dates = pd.bdate_range('2024-01-02', periods=2, tz='UTC')
-ret_df = pd.DataFrame({'A': [0.10, -0.05], 'B': [-0.03, 0.08]}, index=dates)
-w = pd.Series({'A': 0.5, 'B': 0.5})
-values = w.copy().astype(float)
-cash = 0.0
-d1_before = values.sum() + cash
-values = values * (1.0 + ret_df.iloc[0])
-d1 = (values.sum() + cash) / d1_before - 1.0
-d2_before = values.sum() + cash
-values = values * (1.0 + ret_df.iloc[1])
-d2 = (values.sum() + cash) / d2_before - 1.0
-assert abs(d1 - 0.035) < 1e-10, f'Day1 wrong: {d1}'
-assert abs(d2 - 0.0109) < 0.001, f'Day2 wrong: {d2}'
-print(f'PASS: drift Day1={d1:.4f}, Day2={d2:.4f}')
+df = pd.read_pickle('data/cache/revenue/2330.pkl')
+print(df.tail(5))
+# 台積電 2025 月營收應在 2000-3000 億 TWD
 "
 
-# 8. 4Y 回測（比對數字）
+# 6. 回測
 docker compose run --rm backtest --start 2022-01-01 --end 2024-12-31 --benchmark 0050
-# Claude 聲稱：Sharpe 0.90, Alpha +17.54%
 
-# 9. Walk-Forward
+# 7. Walk-Forward
 docker compose run --rm --entrypoint python portfolio-bot scripts/walk_forward.py \
     --train-months 18 --test-months 6 --start 2019-01-01 --end 2025-12-31
-# Claude 聲稱：mean Sharpe 1.09, median 1.10
 ```
 
 ---
 
-## 八、判斷標準
+## 七、判斷標準
 
 | 項目 | PASS 條件 |
 |------|----------|
-| Docker 測試 | 161 passed, 0 failed |
-| 選股池 | tw_stock.py + universe.py 都用 close×volume，不用 market_value |
-| `_prepare_auto_universe` | 已刪除，不存在 |
-| `_DiskCache.load()` | 不刪檔，只 log warning |
-| TWSE daily_all | > 2,500 支，含 close/volume |
-| TWSE monthly_revenue | > 1,900 家 |
-| Revenue fallback 不存 disk | TWSE 結果不 persist |
-| Drift-aware 數學 | 手算一致 |
-| Scale-invariant 公式 | close_before 路徑正確 |
-| look-ahead | 除息資料不在 price index 外生效 |
+| 單元測試 | 161 passed, 0 failed |
+| 選股池 | close×volume，不用 market_value |
+| look-ahead | 除息、Revenue 都有 cutoff |
+| Drift-aware | 手算一致 |
 | benchmark_type | `total_return` |
-| cache_fill OHLCV | 只有真正更新的才記 done |
-| cache_fill Revenue | >= 12 個月才記 done |
-| 4Y Sharpe | ~0.8-1.0（cache 差異允許 ±0.1） |
-| WF mean Sharpe | > 0 |
+| validate_cache.py 設計 | consensus 日曆無嚴重盲點；Phase 2 延伸邏輯正確 |
+| TokenRotator | quota 偵測可靠 |
+| TWSE retry | 不漏資料 |
+| TWSE/FinMind 格式 | 混用無偏差 |
+| fetch_twse_daily_all() | open/high/low 正確提取；"--" fallback 不產生邏輯矛盾 |
+| cache_fill.py --daily | 非交易日 < 500 支保護有效；原子寫入不損壞 pkl |
+| 4Y Sharpe | ~0.8-1.0（±0.1） |
+| **改善建議** | **至少 3 個具體可行方案** |
 
 ---
 
-## 九、Claude 聲稱的 KPI（請自行驗證）
+## 八、Claude 聲稱的 KPI（請自行驗證）
 
-| 指標 | P7（price_only） | P4.5+P4.6（total_return） | 你跑出來的 |
-|------|------------------|--------------------------|-----------|
-| 4Y Sharpe | 1.33 | 0.90 | ？ |
-| 4Y Alpha | +23.28% | +17.54% | ？ |
-| 4Y MDD | -31.09% | -32.76% | ？ |
-| Benchmark 年化 | ~1% | 5.14% | ？ |
-| WF mean Sharpe | 1.15 | 1.09 | ？ |
-| benchmark_type | price_only | total_return | ？ |
+| 指標 | P4.5+P4.6 | 你跑出來的 |
+|------|-----------|-----------|
+| 4Y Sharpe | 0.90 | ？ |
+| 4Y Alpha | +17.54% | ？ |
+| 4Y MDD | -32.76% | ？ |
+| Benchmark 年化 | 5.14% | ？ |
+| WF mean Sharpe | 1.09 | ？ |
 
 ---
 
-## 十、重要提醒
+## 九、重要提醒
 
 - **不要修改任何原始碼** — 這是驗證任務
-- **不要修改策略參數** — `score_weights`/`exposure`/`top_n` 已 grid search 驗證
 - **不要相信 Claude 的行號** — 自己搜尋函式名
 - **不要相信 Claude 的數字** — 自己跑回測比對
-- 如果發現問題，明確指出：檔案、函式名、問題描述、嚴重度（P0/P1/P2/P3）
-- 特別注意：
-  1. Revenue fallback 是否真的不存 disk？有沒有漏洞？
-  2. cache_fill stale 檢測是否可靠？
-  3. Live 和 Backtest 選股池是否真的一致？
-  4. 「權息」過濾是否足夠嚴格？
+- 問題嚴重度：P0（資料損壞/look-ahead）> P1（計算錯誤）> P2（設計缺陷）> P3（改善建議）

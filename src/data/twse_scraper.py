@@ -271,9 +271,9 @@ def fetch_twse_issued_capital() -> dict[str, int]:
             result.update(tpex)
             logger.info("TPEX issued capital: %d companies", len(tpex))
         else:
-            logger.debug("TPEX company profile HTTP %d", resp.status_code)
+            logger.warning("TPEX company profile HTTP %d — TPEX stocks will have no market_value", resp.status_code)
     except Exception as exc:
-        logger.debug("TPEX issued capital fetch failed: %s", exc)
+        logger.warning("TPEX issued capital fetch failed: %s — TPEX stocks will have no market_value", exc)
 
     if result:
         logger.info("Total issued capital fetched: %d companies (TWSE + TPEX)", len(result))
@@ -288,7 +288,7 @@ _TPEX_DAILY_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_dail
 
 
 def fetch_twse_daily_all(as_of: datetime) -> dict[str, dict]:
-    """Return {stock_id: {close, volume, turnover}} for ALL TWSE+TPEX stocks.
+    """Return {stock_id: {open, high, low, close, volume, turnover}} for ALL TWSE+TPEX stocks.
 
     Uses TWSE STOCK_DAY_ALL + TPEX OpenAPI to get a single-day snapshot
     of the entire market in 2 API calls.  Far more efficient than
@@ -330,7 +330,17 @@ def fetch_twse_daily_all(as_of: datetime) -> dict[str, dict]:
                     close = float(str(row[7]).replace(",", ""))
                     volume = int(str(row[2]).replace(",", ""))
                     turnover = float(str(row[3]).replace(",", ""))
+
+                    def _safe_price(val: str, fallback: float) -> float:
+                        s = str(val).replace(",", "").strip()
+                        return float(s) if s not in ("", "--", "---") else fallback
+
+                    open_ = _safe_price(row[4], close)
+                    high  = _safe_price(row[5], close)
+                    low   = _safe_price(row[6], close)
+
                     result[stock_id] = {
+                        "open": open_, "high": high, "low": low,
                         "close": close, "volume": volume, "turnover": turnover,
                     }
                 except (ValueError, TypeError):
@@ -390,28 +400,48 @@ def fetch_twse_stock_day(symbol: str, year: int, month: int) -> list[dict]:
     """Fetch one stock's daily OHLCV for a given month from TWSE.
 
     Returns list of dicts: {date, open, high, low, close, volume}.
-    Tries TWSE first, then TPEX if not found.
-    Returns empty list on failure.
+    Retries on HTTP 307 (TWSE rate-limit redirect) up to 3 times with backoff.
+    Returns empty list only when TWSE genuinely has no data for this stock-month.
     """
-    records: list[dict] = []
+    import time as _time
 
-    # --- Try TWSE ---
     date_str = f"{year}{month:02d}01"
-    try:
-        resp = requests.get(
-            _TWSE_STOCK_DAY_URL,
-            params={"date": date_str, "stockNo": symbol, "response": "json"},
-            timeout=_REQUEST_TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0"},
-            verify=False,
-        )
-        if resp.status_code == 200:
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(
+                _TWSE_STOCK_DAY_URL,
+                params={"date": date_str, "stockNo": symbol, "response": "json"},
+                timeout=_REQUEST_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+                verify=False,
+            )
+
+            if resp.status_code == 307 or resp.status_code == 403:
+                # TWSE rate-limit redirect — wait longer each retry
+                wait = [30, 60, 120][attempt]
+                logger.warning(
+                    "TWSE rate-limited (HTTP %d) for %s %d-%02d, retry %d/%d in %ds",
+                    resp.status_code, symbol, year, month, attempt + 1, max_retries, wait,
+                )
+                _time.sleep(wait)
+                continue
+
+            if resp.status_code != 200:
+                logger.debug("TWSE STOCK_DAY HTTP %d for %s %d-%02d",
+                             resp.status_code, symbol, year, month)
+                return []
+
             data = resp.json()
+            if data.get("stat") != "OK":
+                return []
+
             rows = data.get("data") or []
+            records: list[dict] = []
             for row in rows:
                 if len(row) < 7:
                     continue
-                # [0] 日期(民國) [1] 成交股數 [2] 成交金額 [3] 開盤 [4] 最高 [5] 最低 [6] 收盤
                 date_parsed = _parse_roc_date(str(row[0]))
                 if not date_parsed:
                     continue
@@ -426,16 +456,15 @@ def fetch_twse_stock_day(symbol: str, year: int, month: int) -> list[dict]:
                     })
                 except (ValueError, TypeError):
                     continue
-            if records:
-                return records
-    except Exception as exc:
-        logger.debug("TWSE STOCK_DAY failed for %s %d-%02d: %s", symbol, year, month, exc)
+            return records
 
-    # TPEX individual stock history requires HTML scraping (not implemented).
-    # TPEX stocks are covered by fetch_twse_daily_all() for current-day data.
-    # For historical TPEX OHLCV, FinMind remains the primary source.
+        except Exception as exc:
+            logger.debug("TWSE STOCK_DAY failed for %s %d-%02d: %s", symbol, year, month, exc)
+            if attempt < max_retries - 1:
+                _time.sleep(3)
 
-    return records
+    logger.warning("TWSE STOCK_DAY exhausted retries for %s %d-%02d", symbol, year, month)
+    return []
 
 
 # ---------------------------------------------------------------------------

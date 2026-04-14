@@ -605,7 +605,7 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("market_value")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 3:
+            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
                 return cached
 
         # --- Primary: compute from TWSE shares × OHLCV cache ---

@@ -21,13 +21,18 @@ import logging
 import os
 import pathlib
 import pickle
-import random
 import sys
 import time as _time
 from datetime import datetime, timedelta
 
 import pandas as pd
-import requests as _requests
+
+# Load .env for FINMIND_TOKEN* (local execution)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(pathlib.Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass  # Docker has env vars set directly
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -41,99 +46,253 @@ TWSE_INTERVAL = 1.5  # seconds between TWSE API calls
 START_YEAR = 2019
 START_MONTH = 1
 
-# ---------------------------------------------------------------------------
-# SOCKS5 Proxy Pool — bypass HiNetCDN IP block on www.twse.com.tw/rwd/zh/
-# ---------------------------------------------------------------------------
-_PROXY_LIST_URL = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt"
-_PROXY_POOL: list[str] = []  # filled by _init_proxy_pool()
-_PROXY_IDX = 0
+PROXY_LIST_URL = ("https://raw.githubusercontent.com/proxifly/"
+                  "free-proxy-list/main/proxies/protocols/socks5/data.txt")
 
 
-def _init_proxy_pool(min_working: int = 3, max_scan: int = 150):
-    """Scan for working SOCKS5 proxies that can reach TWSE rwd/zh/ endpoints."""
-    global _PROXY_POOL
-    import urllib3
-    urllib3.disable_warnings()
+# =========================================================================
+# ProxyPool for TWSE (shared by Phase 2 and validate_cache.py)
+# =========================================================================
 
-    # First check if direct access works (no proxy needed)
-    try:
-        r = _requests.get(
-            "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
-            params={"date": "20250301", "stockNo": "2330", "response": "json"},
-            timeout=8, verify=False,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        if r.status_code == 200 and r.json().get("data"):
-            logger.info("TWSE direct access OK — no proxy needed")
-            _PROXY_POOL = ["DIRECT"]
-            return
-    except Exception:
-        pass
+class TwseProxyPool:
+    """Auto-rotate free SOCKS5 proxies when TWSE blocks our IP (HTTP 307)."""
 
-    logger.info("TWSE blocked (IP ban by HiNetCDN), scanning SOCKS5 proxies...")
-    try:
-        resp = _requests.get(_PROXY_LIST_URL, timeout=15, verify=False)
-        candidates = [p.strip() for p in resp.text.strip().split("\n") if p.strip() and ":" in p]
-    except Exception as exc:
-        logger.error("Cannot fetch proxy list: %s", exc)
-        return
+    def __init__(self, max_per_ip: int = 15):
+        self._proxies: list[str] = []
+        self._idx = -1  # -1 = direct connection
+        self._calls = 0
+        self._max = max_per_ip
+        self._active = False  # starts with direct, proxy only on 307
 
-    random.shuffle(candidates)
-    working = []
-    for i, addr in enumerate(candidates[:max_scan], 1):
-        px = {"https": f"socks5h://{addr}", "http": f"socks5h://{addr}"}
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def proxies_dict(self) -> dict | None:
+        if self._idx < 0 or self._idx >= len(self._proxies):
+            return None
+        p = self._proxies[self._idx]
+        return {"http": p, "https": p}
+
+    @property
+    def label(self) -> str:
+        if not self._active or self._idx < 0:
+            return "Direct"
+        if self._idx < len(self._proxies):
+            return f"Proxy({self._proxies[self._idx].split('/')[-1][:20]})"
+        return "NoProxy"
+
+    def record_call(self):
+        self._calls += 1
+
+    def need_rotate(self) -> bool:
+        return self._active and self._calls >= self._max
+
+    def activate_on_307(self):
+        """Switch from direct to proxy mode after detecting 307."""
+        if not self._active:
+            logger.warning("TWSE 307 detected — switching to proxy mode")
+            self._active = True
+            self._rotate()
+
+    def rotate_if_needed(self):
+        if self.need_rotate():
+            self._rotate()
+
+    def _rotate(self):
+        self._idx += 1
+        self._calls = 0
+        if self._idx >= len(self._proxies):
+            new = self._fetch()
+            if new:
+                self._proxies.extend(new)
+            else:
+                logger.warning("No proxies available, waiting 5 min...")
+                _time.sleep(300)
+                new = self._fetch()
+                if new:
+                    self._proxies.extend(new)
+        if self._idx < len(self._proxies):
+            logger.info("Switched to %s", self.label)
+
+    def _fetch(self) -> list[str]:
+        import requests as _req
+        import urllib3
+        import random
+        urllib3.disable_warnings()
+        logger.info("Fetching SOCKS5 proxy list...")
         try:
-            r = _requests.get(
-                "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
-                params={"date": "20250301", "stockNo": "2330", "response": "json"},
-                proxies=px, timeout=6, verify=False,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            if r.status_code == 200 and r.json().get("data"):
-                working.append(addr)
-                logger.info("  [%d/%d] proxy OK: %s (found %d/%d)",
-                            i, max_scan, addr, len(working), min_working)
-                if len(working) >= min_working:
-                    break
+            resp = _req.get(PROXY_LIST_URL, timeout=15)
+            candidates = [l.strip() for l in resp.text.strip().split("\n") if l.strip()]
         except Exception:
-            pass
+            return []
+        random.shuffle(candidates)
+        working = []
+        for p in candidates[:25]:
+            try:
+                r = _req.get(
+                    "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
+                    params={"date": "20240101", "stockNo": "2330", "response": "json"},
+                    proxies={"http": p, "https": p}, timeout=10,
+                    headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+                if r.status_code == 200:
+                    working.append(p)
+                    logger.info("  OK: %s", p)
+                    if len(working) >= 5:
+                        break
+            except Exception:
+                pass
+        logger.info("Found %d working proxies", len(working))
+        return working
 
-    _PROXY_POOL = working
-    if working:
-        logger.info("Proxy pool ready: %d proxies", len(working))
-    else:
-        logger.warning("No working proxies found — TWSE rwd/zh/ requests will fail")
 
+# =========================================================================
+# FinMind Multi-Token Rotator (Phase 3 & 4)
+# =========================================================================
 
-def _get_proxy_kwargs() -> dict:
-    """Return requests kwargs to route through the proxy pool (round-robin)."""
-    global _PROXY_IDX
-    if not _PROXY_POOL or _PROXY_POOL == ["DIRECT"]:
-        return {}
-    addr = _PROXY_POOL[_PROXY_IDX % len(_PROXY_POOL)]
-    _PROXY_IDX += 1
-    return {"proxies": {"https": f"socks5h://{addr}", "http": f"socks5h://{addr}"}}
+class TokenRotator:
+    """Rotate Token + IP together to maximize FinMind quota.
 
+    FinMind free tier: 600 calls/hr per token.
+    Strategy:
+      Token1 + Direct IP     → 580 calls
+      Token2 + Proxy-A (new IP) → 580 calls
+      Token3 + Proxy-B (new IP) → 580 calls
+      All exhausted → wait 65 min, restart from Token1
 
-def _twse_rwd_get(url: str, params: dict, timeout: int = 15, max_retries: int = 3) -> _requests.Response | None:
-    """GET a TWSE rwd/zh/ URL, retrying across proxy pool on failure."""
-    import urllib3
-    urllib3.disable_warnings()
+    Confirmed 2026-04-09: FinMind tracks quota per-token (not per-IP),
+    and tokens work from any IP (JWT ip field is not verified).
+    We still switch IP together with token for maximum safety.
+    """
 
-    for attempt in range(max_retries):
-        proxy_kw = _get_proxy_kwargs()
+    QUOTA_PER_SLOT = 580  # leave 20 call buffer under the 600 limit
+    _PROXY_LIST_URL = ("https://raw.githubusercontent.com/proxifly/"
+                       "free-proxy-list/main/proxies/protocols/socks5/data.txt")
+
+    def __init__(self):
+        self._tokens: list[str] = []
+        for key in ["FINMIND_TOKEN", "FINMIND_TOKEN2", "FINMIND_TOKEN3"]:
+            t = os.environ.get(key, "")
+            if t and t != "your_bot_token_here":
+                self._tokens.append(t)
+        if not self._tokens:
+            raise RuntimeError("No FINMIND_TOKEN found in environment")
+
+        # Slots: (token, proxy_url_or_None)
+        # Slot 0 = Token1 + Direct, Slot 1+ = Token2+ with proxies (fetched on demand)
+        self._slots: list[tuple[str, str | None]] = [(self._tokens[0], None)]
+        self._current_slot = 0
+        self._calls_on_current = 0
+        self._loader = None
+        self._current_proxy: str | None = None  # for external access
+        logger.info("TokenRotator: %d tokens loaded, starting with Token1 + Direct",
+                     len(self._tokens))
+
+    @property
+    def current_label(self) -> str:
+        proxy = self._slots[self._current_slot][1] if self._current_slot < len(self._slots) else None
+        token_num = min(self._current_slot + 1, len(self._tokens))
+        if proxy:
+            return f"Token{token_num}+Proxy({proxy.split('/')[-1][:20]})"
+        return f"Token{token_num}+Direct"
+
+    def _fetch_working_proxy(self) -> str | None:
+        """Fetch and test one working SOCKS5 proxy."""
+        import requests as _req
+        import random
+        logger.info("Fetching free SOCKS5 proxy list...")
         try:
-            resp = _requests.get(
-                url, params=params, timeout=timeout, verify=False,
-                headers={"User-Agent": "Mozilla/5.0"},
-                **proxy_kw,
-            )
-            if resp.status_code == 200:
-                return resp
-            # 307 = still blocked on this proxy, try next
-        except Exception:
-            pass
-    return None
+            resp = _req.get(self._PROXY_LIST_URL, timeout=15)
+            candidates = [l.strip() for l in resp.text.strip().split("\n") if l.strip()]
+        except Exception as exc:
+            logger.warning("Failed to fetch proxy list: %s", exc)
+            return None
+
+        random.shuffle(candidates)
+        for proxy in candidates[:20]:
+            try:
+                r = _req.get("https://api.ipify.org?format=json",
+                             proxies={"http": proxy, "https": proxy}, timeout=8)
+                ip = r.json()["ip"]
+                logger.info("  Proxy OK: %s -> %s", proxy, ip)
+                return proxy
+            except Exception:
+                pass
+        logger.warning("No working proxy found in %d candidates", min(20, len(candidates)))
+        return None
+
+    def _build_remaining_slots(self):
+        """Build slots for Token2, Token3... each with a fresh proxy."""
+        for i in range(1, len(self._tokens)):
+            if i < len(self._slots):
+                continue  # already built
+            proxy = self._fetch_working_proxy()
+            if proxy:
+                self._slots.append((self._tokens[i], proxy))
+                logger.info("Prepared slot %d: Token%d + %s", i, i + 1, proxy)
+            else:
+                logger.warning("Cannot find proxy for Token%d, will use direct", i + 1)
+                self._slots.append((self._tokens[i], None))
+
+    def _make_loader(self):
+        from FinMind.data import DataLoader
+        token, proxy = self._slots[self._current_slot]
+        loader = DataLoader()
+        loader.login_by_token(api_token=token)
+
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+            loader._FinMindApi__session.proxies.update(proxies)
+
+        self._loader = loader
+        self._current_proxy = proxy
+        self._calls_on_current = 0
+        logger.info("Loader ready [%s] (0/%d calls)",
+                     self.current_label, self.QUOTA_PER_SLOT)
+
+    def get_loader(self):
+        """Return a DataLoader, rotating token+proxy if quota is near limit."""
+        if self._loader is None:
+            self._make_loader()
+
+        if self._calls_on_current < self.QUOTA_PER_SLOT:
+            return self._loader
+
+        # Current slot exhausted — move to next
+        next_slot = self._current_slot + 1
+
+        # Build remaining slots if needed (lazy: only fetch proxies when needed)
+        if next_slot >= len(self._slots) and next_slot < len(self._tokens):
+            self._build_remaining_slots()
+
+        if next_slot < len(self._slots):
+            self._current_slot = next_slot
+            self._make_loader()
+            logger.info("Rotated to [%s]", self.current_label)
+        else:
+            # All tokens exhausted — wait for quota reset
+            wait_min = 65
+            logger.warning(
+                "All %d tokens exhausted. Waiting %d min for quota reset...",
+                len(self._tokens), wait_min)
+            _time.sleep(wait_min * 60)
+            self._current_slot = 0
+            self._slots = [(self._tokens[0], None)]  # reset, re-fetch proxies later
+            self._make_loader()
+            logger.info("Quota reset. Restarting from Token1 + Direct")
+        return self._loader
+
+    def record_call(self):
+        """Record one API call."""
+        self._calls_on_current += 1
+
+    def record_quota_error(self):
+        """Force-rotate to next token+proxy on quota error."""
+        logger.warning("[%s] quota error at %d calls, force-rotating",
+                        self.current_label, self._calls_on_current)
+        self._calls_on_current = self.QUOTA_PER_SLOT  # trigger rotation
+        self.get_loader()
 
 
 def _progress_file(phase: int) -> pathlib.Path:
@@ -164,65 +323,6 @@ def _mark_phase_done(phase: int):
     flag.write_text(datetime.now().isoformat())
 
 
-def _fetch_dividends_via_proxy(start_year: int, end_year: int) -> list[dict]:
-    """Fetch TWT49U dividends year-by-year via proxy pool."""
-    all_records: list[dict] = []
-
-    for year in range(start_year, end_year + 1):
-        resp = _twse_rwd_get(
-            "https://www.twse.com.tw/rwd/zh/exRight/TWT49U",
-            params={
-                "startDate": f"{year}0101",
-                "endDate": f"{year}1231",
-                "response": "json",
-            },
-            timeout=15,
-        )
-        if resp is None:
-            logger.warning("TWT49U failed for year %d", year)
-            continue
-
-        try:
-            rows = resp.json().get("data", [])
-        except Exception:
-            continue
-
-        year_count = 0
-        for row in rows:
-            if len(row) < 7:
-                continue
-            div_type = str(row[6]).strip()
-            if div_type != "\u606f":  # "息"
-                continue
-            stock_id = str(row[1]).strip()
-            ex_date = _parse_roc_date(str(row[0]))
-            if not ex_date or not stock_id:
-                continue
-            try:
-                close_before = float(str(row[3]).replace(",", ""))
-                ref_price = float(str(row[4]).replace(",", ""))
-            except (ValueError, TypeError):
-                continue
-            cash_dividend = round(close_before - ref_price, 6)
-            if cash_dividend <= 0:
-                continue
-            all_records.append({
-                "stock_id": stock_id,
-                "ex_date": ex_date,
-                "cash_dividend": cash_dividend,
-                "close_before": close_before,
-                "ref_price": ref_price,
-            })
-            year_count += 1
-
-        logger.info("TWSE dividends %d: %d cash-dividend records", year, year_count)
-        _time.sleep(1.0)
-
-    logger.info("TWSE dividends total: %d records across %d-%d",
-                len(all_records), start_year, end_year)
-    return all_records
-
-
 # =========================================================================
 # Phase 1: stock_info from TWSE + TPEX OpenAPI
 # =========================================================================
@@ -238,10 +338,11 @@ def phase1_stock_info():
     from src.data.twse_scraper import (
         fetch_twse_issued_capital,
         fetch_twse_dividends,
+        _parse_company_profile,
     )
+    import requests
     import urllib3
     urllib3.disable_warnings()
-    import requests
 
     records = []
 
@@ -341,19 +442,17 @@ def phase1_stock_info():
     (si_dir / "_global.meta").write_text(datetime.now().strftime("%Y-%m-%d"))
     logger.info("stock_info saved: %d records", len(df))
 
-    # --- Dividends (TWSE TWT49U via proxy) ---
+    # --- Dividends (TWSE) ---
     div_dir = NEW_CACHE / "dividends"
     div_dir.mkdir(parents=True, exist_ok=True)
     try:
         now = datetime.now()
-        divs = _fetch_dividends_via_proxy(START_YEAR, now.year)
+        divs = fetch_twse_dividends(START_YEAR, now.year)
         if divs:
             with open(div_dir / "_global.pkl", "wb") as f:
                 pickle.dump(divs, f)
             (div_dir / "_global.meta").write_text(now.strftime("%Y-%m-%d"))
             logger.info("Dividends saved: %d records", len(divs))
-        else:
-            logger.warning("Dividends: 0 records (TWSE TWT49U may be blocked)")
     except Exception as exc:
         logger.error("Dividends failed: %s", exc)
 
@@ -365,363 +464,286 @@ def phase1_stock_info():
 # Phase 2: 上市股 OHLCV from TWSE STOCK_DAY
 # =========================================================================
 
-def _parse_roc_date(roc_str: str) -> str | None:
-    """Convert ROC date like '112/07/18' or '112年07月18日' to '2023-07-18'."""
-    import re
-    m = re.match(r"(\d+)\D+(\d+)\D+(\d+)", roc_str)
-    if not m:
-        return None
-    year = int(m.group(1)) + 1911
-    month = int(m.group(2))
-    day = int(m.group(3))
-    return f"{year:04d}-{month:02d}-{day:02d}"
-
-
-def _generate_trading_dates_yyyymmdd(start_year: int, start_month: int) -> list[str]:
-    """Generate weekday dates from start to today as YYYYMMDD strings (for TWSE)."""
-    from datetime import date as _date
-    d = _date(start_year, start_month, 1)
-    today = _date.today()
-    dates = []
-    while d <= today:
-        if d.weekday() < 5:
-            dates.append(d.strftime("%Y%m%d"))
-        d += timedelta(days=1)
-    return dates
-
-
 def phase2_twse_ohlcv():
-    """Fetch OHLCV for all TWSE stocks using STOCK_DAY_ALL (逐日全市場快照 via proxy)."""
-    logger.info("=== Phase 2: 上市股 OHLCV (TWSE STOCK_DAY_ALL) ===")
+    """Fetch OHLCV for all TWSE-listed stocks using STOCK_DAY.
+
+    Fixes applied 2026-04-09 (9 bugs):
+    - Ghost stocks: only mark done when pkl saved
+    - IPO-aware: skip months before listing date
+    - 307 auto-proxy: switch to SOCKS5 proxy on rate limit
+    - Validate before save: check row count + constant data
+    - Progress saved per stock (not every 10)
+    - end_month refreshed per stock
+    - consecutive_empty raised to 24
+    """
+    logger.info("=== Phase 2: 上市股 OHLCV (TWSE) ===")
+
+    import requests as _req
     import urllib3
     urllib3.disable_warnings()
+    from src.data.twse_scraper import _TWSE_STOCK_DAY_URL, _parse_roc_date
 
     si = pd.read_csv(NEW_CACHE / "stock_info" / "stock_info_snapshot.csv")
     si["stock_id"] = si["stock_id"].astype(str).str.strip()
-    twse_stock_set = set(
+    twse_stocks = sorted(set(
         si[si["type"] == "twse"]["stock_id"]
         [si["stock_id"].str.fullmatch(r"\d{4}")]
-    )
-    logger.info("TWSE target stocks: %d", len(twse_stock_set))
+    ))
+
+    # Include key ETFs (not in stock_info)
+    REQUIRED_ETFS = ["0050", "0051", "0052", "0053", "0055", "0056"]
+    for etf in REQUIRED_ETFS:
+        if etf not in twse_stocks:
+            twse_stocks.append(etf)
+    twse_stocks = sorted(twse_stocks)
+
+    # Fix 8: IPO dates from stock_info
+    ipo_dates: dict[str, tuple[int, int]] = {}
+    for _, row in si.iterrows():
+        sid = str(row.get("stock_id", "")).strip()
+        date_str = str(row.get("date", "")).strip()
+        if sid and len(date_str) >= 7:
+            try:
+                dt = pd.to_datetime(date_str)
+                ipo_dates[sid] = (dt.year, dt.month)
+            except Exception:
+                pass
+
+    done_set = set(_load_phase_progress(2))
+    todo = [s for s in twse_stocks if s not in done_set]
+    logger.info("TWSE stocks: %d total, %d done, %d todo", len(twse_stocks), len(done_set), len(todo))
 
     ohlcv_dir = NEW_CACHE / "ohlcv"
     ohlcv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Progress: list of date strings (YYYYMMDD) already done
-    done_dates = set(_load_phase_progress(2))
-    all_dates = _generate_trading_dates_yyyymmdd(START_YEAR, START_MONTH)
-    todo_dates = [d for d in all_dates if d not in done_dates]
-    logger.info("Trading dates: %d total, %d done, %d todo",
-                len(all_dates), len(done_dates), len(todo_dates))
+    pool = TwseProxyPool(max_per_ip=15)
+    global_307_count = 0  # Fix 7: track consecutive 307s
 
-    # Accumulate per-stock records
-    stock_records: dict[str, list[dict]] = {}
-    consecutive_empty = 0
-
-    for i, date_str in enumerate(todo_dates, 1):
+    for i, sym in enumerate(todo, 1):
         if i % 50 == 0 or i <= 3:
-            logger.info("[Phase2 %d/%d] %s ...", i, len(todo_dates), date_str)
+            logger.info("[Phase2 %d/%d] %s [%s] ...", i, len(todo), sym, pool.label)
 
-        resp = _twse_rwd_get(
-            "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL",
-            params={"date": date_str, "response": "json"},
-            timeout=20,
-        )
-        if resp is None:
-            consecutive_empty += 1
-            if consecutive_empty >= 10:
-                logger.warning("10 consecutive failures, pausing 60s to refresh proxies...")
-                _time.sleep(60)
-                consecutive_empty = 0
-            done_dates.add(date_str)
-            _time.sleep(TWSE_INTERVAL)
-            continue
+        # Fix 5: refresh end date per stock
+        now = datetime.now()
+        end_year, end_month = now.year, now.month
 
-        try:
-            data = resp.json()
-            rows = data.get("data") or []
-        except Exception:
-            rows = []
+        # Fix 8: start from IPO date if known
+        ipo = ipo_dates.get(sym)
+        if ipo and ipo > (START_YEAR, START_MONTH):
+            start_y, start_m = ipo
+        else:
+            start_y, start_m = START_YEAR, START_MONTH
 
-        if not rows:
-            consecutive_empty += 1
-            done_dates.add(date_str)
-            _time.sleep(TWSE_INTERVAL)
-            continue
-
+        all_records = []
+        year, month = start_y, start_m
         consecutive_empty = 0
-        # Parse date from response (ROC format like "114年03月03日") or from our date_str
-        resp_date = data.get("date", "")
-        iso_date = _parse_roc_date(resp_date) if resp_date else None
-        if not iso_date:
-            iso_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
 
-        # STOCK_DAY_ALL columns:
-        # [0]=Code [1]=Name [2]=TradeVolume [3]=TradeValue [4]=Open [5]=High [6]=Low [7]=Close [8]=Change [9]=Transaction
-        for row in rows:
-            if len(row) < 8:
-                continue
-            sid = str(row[0]).strip()
-            if sid not in twse_stock_set:
-                continue
+        while (year, month) <= (end_year, end_month):
+            # Fix 2+3: use proxy pool, handle 307
+            pool.rotate_if_needed()
+            date_str = f"{year}{month:02d}01"
+
+            records = []
+            was_307 = False
             try:
-                open_str = str(row[4]).replace(",", "").strip()
-                high_str = str(row[5]).replace(",", "").strip()
-                low_str = str(row[6]).replace(",", "").strip()
-                close_str = str(row[7]).replace(",", "").strip()
-                vol_str = str(row[2]).replace(",", "").strip()
-                if not close_str or close_str == "--" or not open_str or open_str == "--":
-                    continue
-                record = {
-                    "date": iso_date,
-                    "open": float(open_str),
-                    "high": float(high_str),
-                    "low": float(low_str),
-                    "close": float(close_str),
-                    "volume": int(float(vol_str)),
-                }
-                stock_records.setdefault(sid, []).append(record)
-            except (ValueError, TypeError, IndexError):
-                continue
+                resp = _req.get(
+                    _TWSE_STOCK_DAY_URL,
+                    params={"date": date_str, "stockNo": sym, "response": "json"},
+                    timeout=15, headers={"User-Agent": "Mozilla/5.0"},
+                    verify=False, proxies=pool.proxies_dict,
+                )
+                pool.record_call()
 
-        done_dates.add(date_str)
-        if i % 20 == 0:
-            _save_phase_progress(2, sorted(done_dates))
+                if resp.status_code in (307, 403):
+                    was_307 = True
+                    global_307_count += 1
+                    # Fix 7: auto-activate proxy after repeated 307
+                    if global_307_count >= 3:
+                        pool.activate_on_307()
+                        global_307_count = 0
+                        # Retry with proxy
+                        pool.rotate_if_needed()
+                        _time.sleep(2)
+                        resp = _req.get(
+                            _TWSE_STOCK_DAY_URL,
+                            params={"date": date_str, "stockNo": sym, "response": "json"},
+                            timeout=15, headers={"User-Agent": "Mozilla/5.0"},
+                            verify=False, proxies=pool.proxies_dict,
+                        )
+                        pool.record_call()
+                        if resp.status_code in (307, 403):
+                            was_307 = True
 
-        _time.sleep(TWSE_INTERVAL)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("stat") == "OK":
+                        for row in data.get("data") or []:
+                            if len(row) < 7:
+                                continue
+                            dp = _parse_roc_date(str(row[0]))
+                            if not dp:
+                                continue
+                            try:
+                                records.append({
+                                    "date": dp,
+                                    "open": float(str(row[3]).replace(",", "")),
+                                    "high": float(str(row[4]).replace(",", "")),
+                                    "low": float(str(row[5]).replace(",", "")),
+                                    "close": float(str(row[6]).replace(",", "")),
+                                    "volume": int(str(row[1]).replace(",", "")),
+                                })
+                            except (ValueError, TypeError):
+                                continue
+                    global_307_count = 0  # successful request resets counter
+            except Exception:
+                pass
 
-    # Save all stock pkl files
-    logger.info("Saving %d TWSE stocks to pkl...", len(stock_records))
-    for sid, records in stock_records.items():
-        if not records:
-            continue
-        df = pd.DataFrame(records)
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date").sort_index()
-        df.index = df.index.tz_localize("UTC")
-        df = df[["open", "high", "low", "close", "volume"]].dropna()
-        if not df.empty:
-            pkl_path = ohlcv_dir / f"{sid}.pkl"
-            if pkl_path.exists():
-                try:
-                    existing = pd.read_pickle(pkl_path)
-                    df = pd.concat([existing, df])
-                    df = df[~df.index.duplicated(keep="last")].sort_index()
-                except Exception:
-                    pass
-            df.to_pickle(pkl_path)
+            if records:
+                all_records.extend(records)
+                consecutive_empty = 0
+            else:
+                if not was_307:
+                    consecutive_empty += 1
+                # else: 307 doesn't count toward consecutive_empty (Fix 2)
+                # Fix 8: raised from 12 to 24
+                if consecutive_empty >= 24:
+                    break
 
-    _save_phase_progress(2, sorted(done_dates))
-    logger.info("Phase 2 complete: %d dates processed, %d stocks saved",
-                len(todo_dates), len(stock_records))
+            # Next month
+            if month == 12:
+                year += 1
+                month = 1
+            else:
+                month += 1
+
+            _time.sleep(TWSE_INTERVAL)
+
+        # Fix 1 + 6 + 9: validate before save, only mark done if pkl saved
+        if all_records:
+            df = pd.DataFrame(all_records)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()
+            df.index = df.index.tz_localize("UTC")
+            df = df[["open", "high", "low", "close", "volume"]].dropna()
+
+            # Fix 6+9: validation
+            if len(df) < 20:
+                logger.warning("  %s: only %d rows after cleanup, skipping", sym, len(df))
+            elif len(df["close"].unique()) <= 5 and len(df) > 100:
+                logger.warning("  %s: constant data detected, skipping", sym)
+            else:
+                # Atomic write
+                tmp = ohlcv_dir / f"{sym}.tmp"
+                df.to_pickle(tmp)
+                tmp.replace(ohlcv_dir / f"{sym}.pkl")
+                done_set.add(sym)
+                # Fix 4: save progress every stock
+                _save_phase_progress(2, sorted(done_set))
+        else:
+            logger.warning("  %s: no data, NOT marking done", sym)
+
+    _save_phase_progress(2, sorted(done_set))
+    logger.info("Phase 2 complete: %d TWSE stocks processed", len(todo))
 
 
 # =========================================================================
-# Phase 3: 上櫃股 OHLCV from TPEX dailyQuotes (官方)
+# Phase 3: 上櫃股 OHLCV from FinMind
 # =========================================================================
-
-TPEX_INTERVAL = 0.5  # seconds between TPEX API calls
-
-def _generate_trading_dates(start_year: int, start_month: int) -> list[str]:
-    """Generate weekday dates from start to today as ROC date strings (YYY/MM/DD)."""
-    from datetime import date as _date
-    d = _date(start_year, start_month, 1)
-    today = _date.today()
-    dates = []
-    while d <= today:
-        if d.weekday() < 5:  # Mon-Fri
-            roc_year = d.year - 1911
-            dates.append(f"{roc_year}/{d.month:02d}/{d.day:02d}")
-        d += timedelta(days=1)
-    return dates
-
 
 def phase3_tpex_ohlcv():
-    """Fetch OHLCV for all TPEX stocks using dailyQuotes (逐日全市場快照)."""
-    logger.info("=== Phase 3: 上櫃股 OHLCV (TPEX 官方) ===")
-    import urllib3
-    urllib3.disable_warnings()
-    import re
+    """Fetch OHLCV for TPEX stocks using FinMind with multi-token rotation."""
+    logger.info("=== Phase 3: 上櫃股 OHLCV (FinMind) ===")
 
     si = pd.read_csv(NEW_CACHE / "stock_info" / "stock_info_snapshot.csv")
     si["stock_id"] = si["stock_id"].astype(str).str.strip()
-    tpex_stock_set = set(
+    tpex_stocks = sorted(set(
         si[si["type"] == "tpex"]["stock_id"]
         [si["stock_id"].str.fullmatch(r"\d{4}")]
-    )
-    logger.info("TPEX target stocks: %d", len(tpex_stock_set))
+    ))
 
+    done_set = set(_load_phase_progress(3))
+    todo = [s for s in tpex_stocks if s not in done_set]
+    logger.info("TPEX stocks: %d total, %d done, %d todo", len(tpex_stocks), len(done_set), len(todo))
+
+    rotator = TokenRotator()
     ohlcv_dir = NEW_CACHE / "ohlcv"
     ohlcv_dir.mkdir(parents=True, exist_ok=True)
 
-    # Progress: list of date strings already done
-    done_dates = set(_load_phase_progress(3))
-    all_dates = _generate_trading_dates(START_YEAR, START_MONTH)
-    todo_dates = [d for d in all_dates if d not in done_dates]
-    logger.info("Trading dates: %d total, %d done, %d todo",
-                len(all_dates), len(done_dates), len(todo_dates))
+    start_date = f"{START_YEAR}-{START_MONTH:02d}-01"
+    end_date = datetime.now().strftime("%Y-%m-%d")
 
-    # Accumulate records per stock in memory, flush periodically
-    # {stock_id: [{"date": ..., "open": ..., ...}, ...]}
-    stock_records: dict[str, list[dict]] = {}
-    consecutive_empty = 0
+    failed_count = 0
+    data_not_found = []
 
-    for i, date_str in enumerate(todo_dates, 1):
+    for i, sym in enumerate(todo, 1):
         if i % 50 == 0 or i <= 3:
-            logger.info("[Phase3 %d/%d] %s ...", i, len(todo_dates), date_str)
+            logger.info("[Phase3 %d/%d] %s [%s] ...",
+                        i, len(todo), sym, rotator.current_label)
 
         try:
-            resp = _requests.get(
-                "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes",
-                params={"date": date_str, "response": "json"},
-                timeout=15, verify=False,
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            _time.sleep(0.5)
+            loader = rotator.get_loader()
+            raw = loader.taiwan_stock_daily(
+                stock_id=sym, start_date=start_date, end_date=end_date,
             )
-            if resp.status_code != 200:
-                consecutive_empty += 1
-                if consecutive_empty >= 10:
-                    logger.warning("10 consecutive failures, pausing 30s...")
-                    _time.sleep(30)
-                    consecutive_empty = 0
-                done_dates.add(date_str)
-                _time.sleep(TPEX_INTERVAL)
-                continue
-
-            data = resp.json()
-            tables = data.get("tables", [])
-            if not tables or not tables[0].get("data"):
-                # Holiday or no trading
-                consecutive_empty += 1
-                done_dates.add(date_str)
-                _time.sleep(TPEX_INTERVAL)
-                continue
-
-            consecutive_empty = 0
-            rows = tables[0]["data"]
-            # Parse ROC date -> ISO date
-            roc_date = data.get("date", date_str)  # e.g. "114/03/03"
-            iso_date = _parse_roc_date(roc_date)
-            if not iso_date:
-                # Fallback: parse from date_str
-                parts = date_str.split("/")
-                y = int(parts[0]) + 1911
-                iso_date = f"{y}-{parts[1]}-{parts[2]}"
-
-            day_count = 0
-            for row in rows:
-                sid = str(row[0]).strip()
-                if sid not in tpex_stock_set:
-                    continue
-                try:
-                    # [2]=收盤 [4]=開盤 [5]=最高 [6]=最低 [8]=成交股數
-                    close_str = str(row[2]).replace(",", "").strip()
-                    open_str = str(row[4]).replace(",", "").strip()
-                    high_str = str(row[5]).replace(",", "").strip()
-                    low_str = str(row[6]).replace(",", "").strip()
-                    vol_str = str(row[8]).replace(",", "").strip()
-                    # Skip if any price is empty or "--"
-                    if not close_str or close_str == "--" or not open_str or open_str == "--":
-                        continue
-                    record = {
-                        "date": iso_date,
-                        "open": float(open_str),
-                        "high": float(high_str),
-                        "low": float(low_str),
-                        "close": float(close_str),
-                        "volume": int(float(vol_str)),
-                    }
-                    stock_records.setdefault(sid, []).append(record)
-                    day_count += 1
-                except (ValueError, TypeError, IndexError):
-                    continue
-
+            rotator.record_call()
+            if raw is not None and not raw.empty:
+                df = raw.rename(columns={
+                    "date": "timestamp", "max": "high", "min": "low",
+                    "Trading_Volume": "volume",
+                })
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+                df = df.set_index("timestamp").sort_index()
+                for col in ("open", "high", "low", "close", "volume"):
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df[["open", "high", "low", "close", "volume"]].dropna()
+                if not df.empty:
+                    df.to_pickle(ohlcv_dir / f"{sym}.pkl")
+                    failed_count = 0
+                else:
+                    data_not_found.append(sym)
+                    failed_count += 1
+            else:
+                data_not_found.append(sym)
+                failed_count += 1
+        except KeyError as exc:
+            if str(exc) == "'data'":
+                # Likely quota exceeded — FinMind returns no 'data' key
+                rotator.record_quota_error()
+                failed_count = 0  # reset after rotation, retry later
+            else:
+                failed_count += 1
         except Exception as exc:
-            logger.debug("Phase3 error on %s: %s", date_str, exc)
-            consecutive_empty += 1
+            if i <= 5:
+                logger.warning("  Error: %s", exc)
+            failed_count += 1
 
-        done_dates.add(date_str)
-        if i % 20 == 0:
-            _save_phase_progress(3, sorted(done_dates))
+        done_set.add(sym)
+        if i % 50 == 0:
+            _save_phase_progress(3, sorted(done_set))
 
-        _time.sleep(TPEX_INTERVAL)
+        if failed_count >= 20:
+            logger.warning("20 consecutive non-data failures — stopping")
+            _save_phase_progress(3, sorted(done_set))
+            break
 
-    # Save all stock pkl files
-    logger.info("Saving %d TPEX stocks to pkl...", len(stock_records))
-    for sid, records in stock_records.items():
-        if not records:
-            continue
-        df = pd.DataFrame(records)
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date").sort_index()
-        df.index = df.index.tz_localize("UTC")
-        df = df[["open", "high", "low", "close", "volume"]].dropna()
-        if not df.empty:
-            # Merge with existing pkl if any (from resumed runs)
-            pkl_path = ohlcv_dir / f"{sid}.pkl"
-            if pkl_path.exists():
-                try:
-                    existing = pd.read_pickle(pkl_path)
-                    df = pd.concat([existing, df])
-                    df = df[~df.index.duplicated(keep="last")].sort_index()
-                except Exception:
-                    pass
-            df.to_pickle(pkl_path)
-
-    _save_phase_progress(3, sorted(done_dates))
-    logger.info("Phase 3 complete: %d dates processed, %d stocks saved",
-                len(todo_dates), len(stock_records))
+    _save_phase_progress(3, sorted(done_set))
+    if data_not_found:
+        failed_path = PROJECT_ROOT / "data" / "cache_rebuild_failed_tpex.json"
+        with open(failed_path, "w") as f:
+            json.dump(data_not_found, f)
+        logger.info("TPEX data-not-found: %d stocks (saved to %s)", len(data_not_found), failed_path)
+    logger.info("Phase 3 complete")
 
 
 # =========================================================================
 # Phase 4: Revenue from FinMind
 # =========================================================================
 
-def _scan_finmind_proxies(count: int = 3, max_scan: int = 120) -> list[str]:
-    """Find SOCKS5 proxies that can reach api.finmindtrade.com."""
-    import urllib3
-    urllib3.disable_warnings()
-
-    logger.info("Scanning SOCKS5 proxies for FinMind API (%d needed)...", count)
-    try:
-        resp = _requests.get(_PROXY_LIST_URL, timeout=15, verify=False)
-        candidates = [p.strip() for p in resp.text.strip().split("\n")
-                      if p.strip() and ":" in p]
-    except Exception as exc:
-        logger.error("Cannot fetch proxy list: %s", exc)
-        return []
-
-    random.shuffle(candidates)
-    working = []
-    for i, addr in enumerate(candidates[:max_scan], 1):
-        px = {"https": f"socks5h://{addr}", "http": f"socks5h://{addr}"}
-        try:
-            r = _requests.get(
-                "https://api.finmindtrade.com/api/v4/data",
-                params={"dataset": "TaiwanStockMonthRevenue",
-                        "data_id": "2330", "start_date": "2025-01-01"},
-                proxies=px, timeout=8, verify=False,
-            )
-            if r.status_code == 200 and "data" in r.json():
-                working.append(addr)
-                logger.info("  [%d/%d] FinMind proxy OK: %s (found %d/%d)",
-                            i, max_scan, addr, len(working), count)
-                if len(working) >= count:
-                    break
-        except Exception:
-            pass
-
-    logger.info("FinMind proxy scan done: %d working proxies", len(working))
-    return working
-
-
 def phase4_revenue():
-    """Fetch Revenue using FinMind — sequential token+proxy rotation.
-
-    Each token uses a different proxy (different IP) to avoid FinMind's
-    IP-based rate limit. Runs one token at a time until quota exhausted,
-    then switches to next token+proxy pair. No threading, no race conditions.
-    """
-    logger.info("=== Phase 4: Revenue (FinMind, sequential token+proxy) ===")
+    """Fetch Revenue for all stocks using FinMind with multi-token rotation."""
+    logger.info("=== Phase 4: Revenue (FinMind) ===")
 
     from src.data.finmind import FinMindSource
 
@@ -733,107 +755,73 @@ def phase4_revenue():
 
     done_set = set(_load_phase_progress(4))
     todo = [s for s in all_stocks if s not in done_set]
-    logger.info("Revenue: %d total, %d done, %d todo",
-                len(all_stocks), len(done_set), len(todo))
+    logger.info("Revenue: %d total, %d done, %d todo", len(all_stocks), len(done_set), len(todo))
 
-    if not todo:
-        logger.info("Phase 4: nothing to do")
-        return
+    rotator = TokenRotator()
 
-    # Collect available tokens (order matters: try each until quota exhausted)
-    tokens = []
-    for key in ["FINMIND_TOKEN4", "FINMIND_TOKEN", "FINMIND_TOKEN2", "FINMIND_TOKEN3"]:
-        t = os.environ.get(key)
-        if t:
-            tokens.append((key, t))
+    def _make_source() -> FinMindSource:
+        """Create FinMindSource and patch its internal session with current proxy."""
+        token = rotator._slots[rotator._current_slot][0]
+        src = FinMindSource(token=token, backtest_mode=False,
+                            cache_dir=str(NEW_CACHE))
+        if rotator._current_proxy:
+            proxies = {"http": rotator._current_proxy, "https": rotator._current_proxy}
+            src.loader._FinMindApi__session.proxies.update(proxies)
+        return src
 
-    if not tokens:
-        logger.error("No FINMIND_TOKEN found")
-        return
+    source = _make_source()
+    _last_proxy = [rotator._current_proxy]
+    failed_count = 0
 
-    logger.info("Found %d FinMind tokens", len(tokens))
+    for i, sym in enumerate(todo, 1):
+        if i % 100 == 0 or i <= 3:
+            logger.info("[Phase4 %d/%d] %s [%s] ...",
+                        i, len(todo), sym, rotator.current_label)
 
-    # Try direct connection first; scan proxies only when direct quota exhausted
-    use_proxy = False
-    fm_proxies: list[str] = []
+        is_good = False
+        try:
+            df = source.fetch_month_revenue(sym, months=60)
+            rotator.record_call()
+            if df is not None and not df.empty and len(df) >= 12:
+                is_good = True
+                failed_count = 0
+            elif df is not None and not df.empty:
+                # Got data but < 12 months — likely TWSE fallback (FinMind quota hit)
+                failed_count += 1
+            else:
+                failed_count += 1
+        except KeyError:
+            rotator.record_quota_error()
+            source = _make_source()
+            failed_count = 0
+        except Exception:
+            failed_count += 1
 
-    total_ok = 0
+        # Detect quota exhaustion: 10 consecutive short results = FinMind blocked
+        if failed_count == 10:
+            logger.warning("10 consecutive short results — likely quota exhaustion, rotating proxy")
+            rotator.record_quota_error()
+            source = _make_source()
+            _last_proxy[0] = rotator._current_proxy
+            failed_count = 0
 
-    for token_idx, (token_name, token_val) in enumerate(tokens):
-        # Refresh todo (previous token may have completed some)
-        todo = [s for s in all_stocks if s not in done_set]
-        if not todo:
+        # Rebuild source if proxy changed
+        if rotator._current_proxy != _last_proxy[0]:
+            source = _make_source()
+            _last_proxy[0] = rotator._current_proxy
+
+        if is_good:
+            done_set.add(sym)
+        if i % 50 == 0:
+            _save_phase_progress(4, sorted(done_set))
+
+        if failed_count >= 20:
+            logger.warning("20 consecutive failures — stopping")
+            _save_phase_progress(4, sorted(done_set))
             break
 
-        source = FinMindSource(token=token_val, backtest_mode=False,
-                               cache_dir=str(NEW_CACHE))
-
-        # First token: try direct. Subsequent tokens: use proxy.
-        if token_idx == 0:
-            logger.info("[Token %d/%d] %s via DIRECT — %d stocks remaining",
-                        token_idx + 1, len(tokens), token_name, len(todo))
-        else:
-            # Scan proxies on demand (only when we actually need them)
-            if not fm_proxies:
-                fm_proxies = _scan_finmind_proxies(count=len(tokens) - 1)
-            pidx = token_idx - 1
-            if pidx < len(fm_proxies):
-                proxy_addr = fm_proxies[pidx]
-                px = {"https": f"socks5h://{proxy_addr}", "http": f"socks5h://{proxy_addr}"}
-                source.loader._FinMindApi__session.proxies.update(px)
-                logger.info("[Token %d/%d] %s via proxy %s — %d stocks remaining",
-                            token_idx + 1, len(tokens), token_name, proxy_addr, len(todo))
-            else:
-                logger.warning("[Token %d] No proxy available — skipping", token_idx + 1)
-                continue
-
-        failed_count = 0
-        token_ok = 0
-
-        for i, sym in enumerate(todo, 1):
-            if i % 100 == 0 or i <= 3:
-                logger.info("[Token %d] [%d/%d] %s ...",
-                            token_idx + 1, i, len(todo), sym)
-
-            is_good = False
-            try:
-                df = source.fetch_month_revenue(sym, months=60)
-                if df is not None and not df.empty and len(df) >= 12:
-                    is_good = True
-                    failed_count = 0
-                elif df is not None and not df.empty:
-                    failed_count += 1
-                else:
-                    failed_count += 1
-            except KeyError:
-                pass
-            except Exception:
-                failed_count += 1
-
-            if is_good:
-                done_set.add(sym)
-                token_ok += 1
-                total_ok += 1
-            if i % 50 == 0:
-                _save_phase_progress(4, sorted(done_set))
-
-            # Only stop on actual quota exhaustion (HTTP 402), not on
-            # stocks that FinMind genuinely has no data for.
-            # Use a high threshold — many 8xxx/9xxx stocks have no revenue data.
-            if failed_count >= 100:
-                logger.warning("[Token %d] %s — 100 consecutive failures, likely quota exhausted after %d OK — switching",
-                               token_idx + 1, token_name, token_ok)
-                _save_phase_progress(4, sorted(done_set))
-                break
-
-        logger.info("[Token %d] %s finished: %d OK", token_idx + 1, token_name, token_ok)
-
     _save_phase_progress(4, sorted(done_set))
-    remaining = len(all_stocks) - len(done_set)
-    logger.info("Phase 4 done this run: %d OK (total %d/%d, remaining %d)",
-                total_ok, len(done_set), len(all_stocks), remaining)
-    if remaining > 0:
-        logger.info("Re-run --phase 4 after quota resets to continue")
+    logger.info("Phase 4 complete")
 
 
 # =========================================================================
@@ -874,19 +862,23 @@ def phase5_market_value():
                     "date": ts.tz_localize(None),
                     "market_value": float(row["close"]) * shares[sym],
                 })
-        except Exception:
+        except Exception as exc:
+            logger.warning("  %s: failed to compute market_value: %s", sym, exc)
             continue
 
-    if records:
-        mv_dir = NEW_CACHE / "market_value"
-        mv_dir.mkdir(parents=True, exist_ok=True)
-        result = pd.DataFrame(records)
-        result["date"] = pd.to_datetime(result["date"])
-        result["market_value"] = pd.to_numeric(result["market_value"], errors="coerce")
-        result = result.sort_values(["stock_id", "date"]).reset_index(drop=True)
-        result.to_pickle(mv_dir / "_global.pkl")
-        (mv_dir / "_global.meta").write_text(datetime.now().strftime("%Y-%m-%d"))
-        logger.info("market_value saved: %d stocks, %d records", len(shares), len(result))
+    if not records:
+        logger.error("No market_value records produced — OHLCV cache may be empty or unreadable. Phase 5 NOT marked done.")
+        return
+
+    mv_dir = NEW_CACHE / "market_value"
+    mv_dir.mkdir(parents=True, exist_ok=True)
+    result = pd.DataFrame(records)
+    result["date"] = pd.to_datetime(result["date"])
+    result["market_value"] = pd.to_numeric(result["market_value"], errors="coerce")
+    result = result.sort_values(["stock_id", "date"]).reset_index(drop=True)
+    result.to_pickle(mv_dir / "_global.pkl")
+    (mv_dir / "_global.meta").write_text(datetime.now().strftime("%Y-%m-%d"))
+    logger.info("market_value saved: %d stocks, %d records", result["stock_id"].nunique(), len(result))
 
     _mark_phase_done(5)
     logger.info("Phase 5 complete")
@@ -909,6 +901,12 @@ def main():
         print(f"Phase 3 (TPEX OHLCV):   {len(_load_phase_progress(3))} stocks done")
         print(f"Phase 4 (Revenue):      {len(_load_phase_progress(4))} stocks done")
         print(f"Phase 5 (market_value): {'done' if _is_phase_done(5) else 'pending'}")
+        # Token info
+        tokens = [os.environ.get(k, "") for k in
+                  ["FINMIND_TOKEN", "FINMIND_TOKEN2", "FINMIND_TOKEN3"]
+                  if os.environ.get(k, "") and os.environ.get(k, "") != "your_bot_token_here"]
+        print(f"FinMind tokens:         {len(tokens)} available")
+        print(f"SOCKS5 proxy:           {os.environ.get('SOCKS5_PROXY', 'none')}")
         return
 
     NEW_CACHE.mkdir(parents=True, exist_ok=True)
@@ -917,10 +915,6 @@ def main():
         phases = [args.phase]
     else:
         phases = [1, 2, 3, 4, 5]
-
-    # Init proxy pool for phases that need TWSE rwd/zh/ access (1, 2)
-    if any(p in phases for p in (1, 2)):
-        _init_proxy_pool()
 
     for p in phases:
         if p == 1:
