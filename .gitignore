@@ -21,10 +21,14 @@ data/cache_rebuild_*.json
 data/cache_rebuild_*.flag
 data/cache_fill_progress.json
 
-# Reports — 保留在 git 供跨機器比對（非唯一真相，換機器後應重跑並比對差異）
-# reports/
+# Reports（本機保留，不公開）
+reports/
 
 # Internal docs（本機保留，不公開）
+config/grid_*.yaml
+config/fw_*.yaml
+config/p2_*.yaml
+config/settings_*.yaml
 Claude-Prompt.md
 Codex-Prompt.md
 CLAUDE.md
