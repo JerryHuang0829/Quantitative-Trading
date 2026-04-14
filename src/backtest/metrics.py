@@ -310,7 +310,11 @@ def compute_metrics(
             # Beta
             cov_matrix = aligned[["portfolio", "benchmark"]].cov()
             bench_var = aligned["benchmark"].var()
-            beta = cov_matrix.loc["portfolio", "benchmark"] / bench_var if bench_var > 0 else 1.0
+            if bench_var > 0:
+                beta = cov_matrix.loc["portfolio", "benchmark"] / bench_var
+            else:
+                beta = 0.0
+                logger.warning("Beta: benchmark variance is zero, defaulting to 0.0")
             result["beta"] = round(beta, 4)
 
             # Default to price_only; engine.py overrides to "total_return"

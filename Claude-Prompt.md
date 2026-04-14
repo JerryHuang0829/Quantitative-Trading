@@ -1,6 +1,6 @@
 # Claude 交接 Prompt
 
-最後更新：2026-04-14
+最後更新：2026-04-15
 請用中文回覆。
 
 ---
@@ -17,11 +17,12 @@
 - **benchmark**：`total_return`（含配息，P4.5）
 - **日報酬**：drift-aware buy-and-hold within period（P4.6）
 
-### 回測績效（P4.5+P4.6 修正後）
+### 回測績效（新 Cache + Split Fix 後，2026-04-15）
 
 | 回測 | Sharpe | Alpha | MDD | 性質 |
 |------|--------|-------|-----|------|
-| 4Y（2022-2024） | 0.90 | +17.54% | -32.76% | IS+OOS |
+| 4Y（2022-2025） | 0.97 | +4.91% | -32.19% | IS+OOS |
+| 2025 OOS | 1.88 | +7.27% | -16.75% | Out-of-Sample |
 | **Walk-Forward 平均** | **1.09** | **+45.63%** | **-26.74%** | **11 段 OOS** |
 | Bootstrap 95% CI | [-0.13, 2.41] | — | — | ⚠️ 不顯著 |
 
@@ -37,6 +38,9 @@
 | P4.5 Total Return Benchmark（配息） | ✅ |
 | P4.6 Drift-aware 日報酬 | ✅ |
 | **Cache 全新重建** | **✅ 全部完成（Phase 1-5 done，資料到 2026-04-14，目錄已切換為 `data/cache`）** |
+| **0050 Split Fix** | **✅ market_view 前復權修復（`tw_stock.py`，2025 Alpha -10%→+7.27%）** |
+| **全專案盲點修正 Phase 1-4** | **✅ 20 項修正（S1-S5 + D1-D5 + O1-O3 + C1-C4）** |
+| **雙視角全專案審查** | **✅ APPROVE — 無 P0 級問題** |
 
 ---
 
@@ -181,11 +185,12 @@ mv data/cache_new data/cache       # 新 cache 上線
 | `scripts/cache_health.py` | 資料完整性報告 |
 | `scripts/cache_fill.py` | 日常 Cache 維護（`--daily` / `--daily-tpex` / `--revenue-only` / `--refresh-all`） |
 | `scripts/run_backtest.py` | 回測 CLI |
-| `scripts/walk_forward.py` | Walk-Forward + Bootstrap Sharpe CI |
+| `scripts/walk_forward.py` | Rolling OOS 滾動驗證 + Bootstrap Sharpe CI |
+| `scripts/regime_simulation.py` | Regime 改進模擬（研究用，不影響生產） |
 | `scripts/paper_trade.py` | Paper Trading 記錄器 |
 | `scripts/real_trade.py` | 小額實盤追蹤 |
 | `tests/` | 161 個測試（14 個測試檔） |
-| `data/cache/` | **正式 cache（TWSE 1,077支 + TPEX 881支，資料到 2026-04-14）** |
+| `data/cache/` | **正式 cache（TWSE 1,077支 + TPEX 881支，資料到 2026-04-15）** |
 | `data/cache_old/` | 舊 cache 備份（2026-04-14 前的版本，可刪） |
 | `data/validate_fix_list.json` | validate_cache.py 產生的修復清單 |
 | `data/fix_twse_progress.json` | TWSE fix 月份級別進度（月份 key: `sym_yr_mo`） |
@@ -219,12 +224,9 @@ PYTHONPATH=. python scripts/validate_cache.py --fix --source twse
 PYTHONPATH=. python scripts/validate_cache.py --fix --source tpex
 ```
 
-### 最高優先：跑回測確認新 cache
+### 回測驗證（✅ 已完成）
 
-```bash
-# 確認新 cache 結果合理（對比舊 Sharpe 0.90）
-docker compose run --rm backtest --start 2022-01-01 --end 2024-12-31 --benchmark 0050
-```
+新 cache + 0050 split fix 後：4Y Sharpe 0.97、2025 OOS Sharpe 1.88、Alpha +7.27%。
 
 ### Paper Trading
 
@@ -294,8 +296,9 @@ FinMind 免費版的 OHLCV = TWSE 原始價格（`TaiwanStockPriceAdj` 需付費
 |--------|-----------|------|
 | P6 原始 | 1.41 | price_only benchmark |
 | P7（第二台） | 1.33 | cache 差異 |
-| P4.5+P4.6 | **0.90** | drift-aware + total return（更真實） |
-| Cache 重建後 | **待驗證** | 新 cache 可能略有變化 |
+| P4.5+P4.6 | 0.90 | drift-aware + total return（更真實） |
+| Cache 重建後（舊 cache） | 0.84 | 新 cache + total return benchmark |
+| **0050 Split Fix 後** | **0.97** | **修復 market_view 分割處理（+0.13）** |
 
 ---
 
@@ -426,13 +429,55 @@ FinMind 免費版的 OHLCV = TWSE 原始價格（`TaiwanStockPriceAdj` 需付費
 
 ---
 
-## 九. 文件索引
+## 九. 全專案盲點修正 + 雙視角審查（2026-04-15）
+
+### 全專案盲點修正 Phase 1-4（20 項修正）
+
+| 類別 | 修正 | 位置 |
+|------|------|------|
+| S1 | `_metric_ranks` NaN>50% 回傳 False | tw_stock.py |
+| S2 | Hold buffer 排除 logging | tw_stock.py |
+| S3 | `_cap_and_redistribute` 無 warning | tw_stock.py |
+| S4 | Beta 零方差 fallback 改 0.0 | metrics.py |
+| S5 | `score_weights` 合計驗證 | tw_stock.py |
+| D1 | 空 sentinel 永久阻止重試 | finmind.py |
+| D2 | `datetime.now()` 統一 TW_TZ | finmind.py |
+| D4 | OHLCV schema 驗證 | cache_fill.py |
+| D5 | TWSE/TPEX index name 統一（改用 stock_info CSV 偵測） | cache_fill.py |
+| O1 | Token fallback timeout 30s | run_backtest.py |
+| O3 | Walk-Forward 正名 Rolling OOS | walk_forward.py |
+| C1 | 重複常數統一 constants.py（7 個新常數） | constants.py + tw_stock.py + engine.py |
+| C2 | 刪除未使用 binance.py（77 行） | src/data/binance.py |
+| C3 | 決策 logging（active factors + top-10 ranked + selection result） | tw_stock.py |
+| C4 | Magic numbers 移至 constants.py | constants.py + tw_stock.py |
+
+### 審查後額外修正
+
+| # | 修正 | 位置 |
+|---|------|------|
+| 1 | Profile `tw_3m_stable` 殘留舊值對齊（max_same_industry 2→3, price_momentum 0.45→0.55, institutional_flow 0.10→0.00） | tw_stock.py |
+| 2 | 停用因子加 as_of WARNING 註解（fetch_institutional, fetch_financial_quality） | tw_stock.py |
+| 3 | `.env.example` 補齊 TOKEN2/TOKEN3 文件 | .env.example |
+| 4 | TWSE STOCK_DAY_ALL 寫入加 `close > 0` 過濾（與 TPEX 統一） | cache_fill.py |
+
+### 雙視角全專案審查結論（APPROVE ✅）
+
+- **無 P0 級問題**
+- Look-ahead bias 防護完整（`_DataSlicer` + 營收 35 天延遲 + split 前復權）
+- Survivorship bias 防護到位（HistoricalUniverse + 下市股）
+- 策略參數安全且有多層防護（config merge + 權重驗證 + CLAUDE.md 守則）
+- 最大風險：測試覆蓋不足（tw_stock.py 1,259 行核心無直接單元測試）
+- constants.py 新增 7 個常數：`TW_ROUND_TRIP_COST`、`MIN_OHLCV_BARS`、`MOMENTUM_PERIOD_3M/6M/12M`、`MOMENTUM_SKIP_DAYS`、`REVENUE_LAG_DAYS`
+
+---
+
+## 十. 文件索引
 
 | 文件 | 內容 | 最後更新 |
 |------|------|---------|
-| `Claude-Prompt.md` | 本檔（交接用） | 2026-04-14 |
-| `Codex-Prompt.md` | Codex 驗證（全架構 + P4.5/P4.6 + validate_cache.py 盲點修復） | 2026-04-13 |
-| `優化紀錄.md` | 完整修改歷程 P0-P7 + Cache 重建 + 04-14 新增 | 2026-04-14 |
+| `Claude-Prompt.md` | 本檔（交接用） | 2026-04-15 |
+| `Codex-Prompt.md` | Codex 驗證（全架構 + P4.5/P4.6 + validate_cache.py 盲點修復 + Split Fix KPIs） | 2026-04-15 |
+| `優化紀錄.md` | 完整修改歷程 P0-P7 + Cache 重建 + Split Fix + 全專案審查 | 2026-04-15 |
 | `策略研究.md` | P1-P3 因子研究結論 | 2026-04-01 |
-| `CLAUDE.md` | Claude Code 指引 + Skills 索引 | 2026-04-14 |
-| `README.md` | 專案架構、Docker 操作 | 2026-04-10 |
+| `CLAUDE.md` | Claude Code 指引 + Skills 索引 | 2026-04-15 |
+| `README.md` | 專案架構、Docker 操作 | 2026-04-15 |

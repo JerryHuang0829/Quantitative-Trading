@@ -240,7 +240,7 @@ class FinMindSource(DataSource):
         if timeframe != "D":
             logger.warning("FinMind only supports daily data; requested timeframe=%s", timeframe)
 
-        now = datetime.now()
+        now = datetime.now(TW_TZ)
         end_str = now.strftime("%Y-%m-%d")
         want_start = now - timedelta(days=int(limit * 1.8))
 
@@ -338,7 +338,7 @@ class FinMindSource(DataSource):
     # ---------------------------------------------------------- Institutional
 
     def fetch_institutional(self, symbol: str, days: int = 30) -> pd.DataFrame | None:
-        now = datetime.now()
+        now = datetime.now(TW_TZ)
         end_str = now.strftime("%Y-%m-%d")
 
         cached = self._disk.load("institutional", symbol)
@@ -375,8 +375,9 @@ class FinMindSource(DataSource):
                 symbol, wide_start.strftime("%Y-%m-%d"), end_str,
             )
             if cached is None or cached.empty:
-                # 存入空 DataFrame 作為哨兵，避免下次再呼叫 API
-                self._disk.save("institutional", pd.DataFrame(), symbol)
+                # Don't persist empty sentinel to disk — a transient API failure
+                # (rate limit, network) would permanently block retries.
+                # _DataSlicer's in-memory cache handles per-run dedup.
                 return None
             changed = True
 
@@ -424,7 +425,7 @@ class FinMindSource(DataSource):
     # --------------------------------------------------------- Month Revenue
 
     def fetch_month_revenue(self, symbol: str, months: int = 15) -> pd.DataFrame | None:
-        now = datetime.now()
+        now = datetime.now(TW_TZ)
         end_str = now.strftime("%Y-%m-%d")
 
         cached = self._disk.load("revenue", symbol)
@@ -535,7 +536,7 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("stock_info")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+            if (datetime.now(TW_TZ).replace(tzinfo=None) - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
                 # pickle cache 有效 — 確保 CSV 備援也存在
                 self._ensure_stock_info_csv(cached)
                 return cached
@@ -558,7 +559,7 @@ class FinMindSource(DataSource):
 
         result = df.copy()
         self._disk.save("stock_info", result)
-        self._disk.save_meta("stock_info", datetime.now().strftime("%Y-%m-%d"))
+        self._disk.save_meta("stock_info", datetime.now(TW_TZ).strftime("%Y-%m-%d"))
         # 每次 API 成功後同步更新 CSV 快照，供 pickle 損壞時作為最終備援
         self._save_stock_info_csv_snapshot(result)
         return result
@@ -605,7 +606,7 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("market_value")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+            if (datetime.now(TW_TZ).replace(tzinfo=None) - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
                 return cached
 
         # --- Primary: compute from TWSE shares × OHLCV cache ---
@@ -617,7 +618,7 @@ class FinMindSource(DataSource):
 
         if result is not None and not result.empty:
             self._disk.save("market_value", result)
-            self._disk.save_meta("market_value", datetime.now().strftime("%Y-%m-%d"))
+            self._disk.save_meta("market_value", datetime.now(TW_TZ).strftime("%Y-%m-%d"))
             return result
 
         return cached
@@ -684,7 +685,7 @@ class FinMindSource(DataSource):
 
     def _fetch_market_value_finmind(self, days: int = 10) -> pd.DataFrame | None:
         """Fallback: fetch market_value from FinMind (requires paid account)."""
-        end_date = datetime.now()
+        end_date = datetime.now(TW_TZ)
         start_date = end_date - timedelta(days=max(days, 5))
 
         self._rate_limit()
@@ -724,7 +725,7 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("delisting")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+            if (datetime.now(TW_TZ).replace(tzinfo=None) - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
                 return cached
 
         self._rate_limit()
@@ -732,7 +733,7 @@ class FinMindSource(DataSource):
             df = self.loader.taiwan_stock_delisting()
             if df is not None and not df.empty:
                 self._disk.save("delisting", df)
-                self._disk.save_meta("delisting", datetime.now().strftime("%Y-%m-%d"))
+                self._disk.save_meta("delisting", datetime.now(TW_TZ).strftime("%Y-%m-%d"))
                 return df
         except (AttributeError, TypeError):
             logger.info("FinMind does not support taiwan_stock_delisting")
@@ -753,7 +754,7 @@ class FinMindSource(DataSource):
         meta = self._disk.meta("quality", symbol)
         if cached is not None and meta:
             try:
-                if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 90:
+                if (datetime.now(TW_TZ).replace(tzinfo=None) - datetime.strptime(meta, "%Y-%m-%d")).days < 90:
                     # cached is a pickle of dict
                     return cached.to_dict("records")[0] if hasattr(cached, "to_dict") else cached
             except Exception:
@@ -761,7 +762,7 @@ class FinMindSource(DataSource):
 
         self._rate_limit()
         try:
-            start = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+            start = (datetime.now(TW_TZ) - timedelta(days=400)).strftime("%Y-%m-%d")
             fs = self.loader.taiwan_stock_financial_statement(stock_id=symbol, start_date=start)
             if fs is None or fs.empty:
                 return None
@@ -796,7 +797,7 @@ class FinMindSource(DataSource):
             # 存快取（用 DataFrame 包裝以相容 _DiskCache）
             import pandas as _pd
             self._disk.save("quality", _pd.DataFrame([result]), symbol)
-            self._disk.save_meta("quality", datetime.now().strftime("%Y-%m-%d"), symbol)
+            self._disk.save_meta("quality", datetime.now(TW_TZ).strftime("%Y-%m-%d"), symbol)
             return result
 
         except Exception as exc:
@@ -879,7 +880,7 @@ class FinMindSource(DataSource):
 
         meta = self._disk.meta("dividends")
         if cached is not None and meta:
-            if (datetime.now() - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
+            if (datetime.now(TW_TZ).replace(tzinfo=None) - datetime.strptime(meta, "%Y-%m-%d")).days < 7:
                 return cached
 
         from .twse_scraper import fetch_twse_dividends
@@ -892,7 +893,7 @@ class FinMindSource(DataSource):
                         _pkl.dump(records, f)
                 except Exception as exc:
                     logger.warning("Dividend cache write failed: %s", exc)
-                self._disk.save_meta("dividends", datetime.now().strftime("%Y-%m-%d"))
+                self._disk.save_meta("dividends", datetime.now(TW_TZ).strftime("%Y-%m-%d"))
                 return records
         except Exception as exc:
             logger.warning("Failed to fetch TWSE dividends: %s", exc)

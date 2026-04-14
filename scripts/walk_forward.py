@@ -1,9 +1,14 @@
-"""Walk-Forward validation framework.
+"""Rolling Out-of-Sample (OOS) validation framework.
 
-Splits the full backtest period into rolling train/test windows
-and runs the backtest engine on each test window independently.
-Aggregates OOS metrics to assess strategy robustness across
-different market regimes.
+NOTE: This is NOT a true Walk-Forward optimization — the train window is
+specified for documentation purposes only. Every test window uses the same
+fixed config (settings.yaml) rather than re-fitting parameters on each
+train window. The result is a rolling OOS backtest that assesses strategy
+robustness across different market regimes.
+
+Splits the full period into rolling train/test windows and runs the
+backtest engine on each test window independently. Aggregates OOS
+metrics to evaluate consistency.
 
 Usage:
     # Default: 18-month train + 6-month test, 2019-2025
@@ -133,7 +138,7 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("  Walk-Forward Validation")
+    print("  Rolling OOS Validation (fixed config, no re-fitting)")
     print("=" * 60)
     print(f"  Train: {args.train_months} months, Test: {args.test_months} months")
     print(f"  Range: {args.start} → {args.end}")

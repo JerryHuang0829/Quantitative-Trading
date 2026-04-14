@@ -138,7 +138,15 @@ def _resolve_token_and_source(benchmark: str) -> FinMindSource:
     for env_key, token in tokens:
         print(f"\n嘗試 {env_key} ...")
         source = FinMindSource(token=token, backtest_mode=True)
-        if _preflight_check(source, benchmark_symbol=benchmark):
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_preflight_check, source, benchmark)
+                passed = future.result(timeout=30)
+        except concurrent.futures.TimeoutError:
+            print(f"{env_key} preflight 超時 (30s)，嘗試下一個 token...\n")
+            continue
+        if passed:
             print(f"使用 {env_key} 進行回測\n")
             return source
         print(f"{env_key} preflight 失敗，嘗試下一個 token...\n")

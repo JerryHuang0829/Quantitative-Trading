@@ -17,14 +17,13 @@ from ..portfolio.tw_stock import (
     get_portfolio_config,
 )
 from ..storage.database import compute_config_hash
-from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS
+from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS, TW_ROUND_TRIP_COST
 from .metrics import adjust_dividends, adjust_splits, compute_metrics, format_report
 from .universe import HistoricalUniverse
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SLIPPAGE_BPS = 5
-DEFAULT_ROUND_TRIP_COST = 0.0047
 
 
 def _compute_theme_concentration(
@@ -291,7 +290,7 @@ class BacktestEngine:
         self._portfolio_config = get_portfolio_config(config)
         self._slippage_bps = slippage_bps
         self._round_trip_cost = float(
-            self._portfolio_config.get("turnover_cost", DEFAULT_ROUND_TRIP_COST)
+            self._portfolio_config.get("turnover_cost", TW_ROUND_TRIP_COST)
         )
         # backtest section defaults（向後相容：config 無此 section 時用原有預設值）
         _bt = config.get("backtest", {})

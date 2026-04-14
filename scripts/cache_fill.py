@@ -41,6 +41,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_OHLCV_REQUIRED_COLS = {"open", "high", "low", "close", "volume"}
+
+
+def _validate_ohlcv(df: pd.DataFrame, label: str) -> bool:
+    """Return True if df has all required OHLCV columns."""
+    missing = _OHLCV_REQUIRED_COLS - set(df.columns)
+    if missing:
+        logger.warning("%s: missing OHLCV columns %s — skipping write", label, missing)
+        return False
+    return True
 CACHE_DIR = pathlib.Path(os.environ.get("DATA_CACHE_DIR", PROJECT_ROOT / "data" / "cache"))
 PROGRESS_FILE = PROJECT_ROOT / "data" / "cache_fill_progress.json"
 
@@ -171,6 +181,10 @@ def _daily_ohlcv_update(ohlcv_dir: pathlib.Path) -> tuple[int, int]:
             # Append + 原子寫入（防中途崩潰損毀）
             df = pd.concat([df, new_row]).sort_index()
             df = df[~df.index.duplicated(keep="last")]
+            df = df[df["close"] > 0]  # 過濾 close=0 行（與 TPEX 一致）
+            if not _validate_ohlcv(df, sym):
+                skipped += 1
+                continue
             tmp = pkl_path.with_suffix(".tmp")
             df.to_pickle(tmp)
             tmp.replace(pkl_path)
@@ -199,18 +213,24 @@ def _daily_tpex_update(ohlcv_dir: pathlib.Path) -> tuple[int, int]:
     end_str = today.strftime("%Y-%m-%d")
     today_ts = pd.Timestamp(today.date(), tz="UTC")
 
-    # 找出所有 TPEX 股票（有 pkl 且 index_name == "timestamp"）
-    tpex_pkls = []
-    for pkl_path in sorted(ohlcv_dir.glob("*.pkl")):
-        try:
-            df = pd.read_pickle(pkl_path)
-            if df.index.name == "timestamp":
-                tpex_pkls.append((pkl_path.stem, pkl_path))
-        except Exception:
-            pass
+    # 找出所有 TPEX 股票（從 stock_info CSV 的 type 欄位判斷，比讀 pkl index_name 更快更可靠）
+    tradeable = _get_tradeable_stocks()
+    try:
+        csv_path = CACHE_DIR / "stock_info" / "stock_info_snapshot.csv"
+        si = pd.read_csv(csv_path)
+        si["stock_id"] = si["stock_id"].astype(str).str.strip()
+        tpex_ids = set(si[si["type"] == "tpex"]["stock_id"]) & tradeable
+    except Exception:
+        tpex_ids = set()
+
+    tpex_pkls = [
+        (pkl_path.stem, pkl_path)
+        for pkl_path in sorted(ohlcv_dir.glob("*.pkl"))
+        if pkl_path.stem in tpex_ids
+    ]
 
     if not tpex_pkls:
-        logger.warning("No TPEX pkls found (index_name='timestamp') in %s", ohlcv_dir)
+        logger.warning("No TPEX pkls found in %s", ohlcv_dir)
         return 0, 0
 
     logger.info("TPEX daily update: %d stocks, %s ~ %s", len(tpex_pkls), start_str, end_str)
@@ -232,6 +252,10 @@ def _daily_tpex_update(ohlcv_dir: pathlib.Path) -> tuple[int, int]:
             df = pd.concat([df, ndf])
             df = df[~df.index.duplicated(keep="last")].sort_index()
             df = df[df["close"] > 0]
+            df.index.name = "date"  # normalize: TPEX 原為 "timestamp"
+            if not _validate_ohlcv(df, sym):
+                failed += 1
+                continue
             tmp = pkl_path.with_suffix(".tmp")
             df.to_pickle(tmp)
             tmp.replace(pkl_path)

@@ -10,15 +10,22 @@ from ..storage.database import compute_config_hash
 
 import pandas as pd
 
+from ..backtest.metrics import adjust_splits
 from ..features.institutional import score_institutional
 from ..strategy.indicators import calculate_indicators
 from ..strategy.regime import detect_regime, get_regime_display
-from ..utils.constants import TW_TZ
+from ..utils.constants import (
+    MIN_OHLCV_BARS,
+    MOMENTUM_PERIOD_3M,
+    MOMENTUM_PERIOD_6M,
+    MOMENTUM_PERIOD_12M,
+    MOMENTUM_SKIP_DAYS,
+    REVENUE_LAG_DAYS,
+    TW_ROUND_TRIP_COST,
+    TW_TZ,
+)
 
 logger = logging.getLogger(__name__)
-
-# 台股個股來回交易成本 ≈ 0.47%（手續費 0.1425% x2 + 證交稅 0.3% 賣出）
-TW_STOCK_ROUND_TRIP_COST = 0.0047
 
 DEFAULT_PORTFOLIO_CONFIG = {
     "profile": None,
@@ -63,7 +70,7 @@ DEFAULT_PORTFOLIO_CONFIG = {
         "institutional_flow": 0.10,
     },
     # 交易成本相關
-    "turnover_cost": TW_STOCK_ROUND_TRIP_COST,
+    "turnover_cost": TW_ROUND_TRIP_COST,
     "turnover_score_threshold": 5.0,  # 新股 score 需超過被替換股至少 N 分才換倉
     # 產業分散
     "max_same_industry": 2,  # 同產業最多持有 N 檔
@@ -83,17 +90,17 @@ PORTFOLIO_PROFILES = {
         "hold_score_floor": 60.0,
         "max_position_weight": 0.12,
         "turnover_score_threshold": 6.0,
-        "max_same_industry": 2,
+        "max_same_industry": 3,  # P1 驗證：2→3（settings.yaml 為準）
         "exposure": {
             "risk_on": 0.96,
             "caution": 0.70,
             "risk_off": 0.35,
         },
         "score_weights": {
-            "price_momentum": 0.45,
+            "price_momentum": 0.55,     # P1-P3 grid search 最佳
             "trend_quality": 0.20,
             "revenue_momentum": 0.25,
-            "institutional_flow": 0.10,
+            "institutional_flow": 0.00,  # 已停用（P2 測試績效下降）
         },
     },
     "tw_6m_defensive": {
@@ -144,6 +151,12 @@ def get_portfolio_config(config: dict) -> dict:
         **profile.get("score_weights", {}),
         **user_config.get("score_weights", {}),
     }
+    weight_sum = sum(merged["score_weights"].values())
+    if abs(weight_sum - 1.0) > 0.01:
+        logger.warning(
+            "score_weights sum to %.2f (expected ~1.0); normalization will adjust",
+            weight_sum,
+        )
     return merged
 
 
@@ -397,6 +410,13 @@ def _analyze_market_proxy(source, default_strategy: dict, portfolio_config: dict
             "signal": "caution",
         }
 
+    # Forward-adjust stock splits so SMA/ADX calculations are not corrupted
+    # by price discontinuities (e.g. 0050 1:4 split in 2025-06).
+    df = df.copy()
+    for col in ("open", "high", "low", "close"):
+        if col in df.columns:
+            df[col] = adjust_splits(df[col])
+
     df = calculate_indicators(df, strategy)
     latest = df.iloc[-1]
     regime = detect_regime(df)
@@ -524,7 +544,7 @@ def _analyze_symbol(
     strategy = {**default_strategy, **sym_config.get("strategy", {})}
 
     df = source.fetch_ohlcv(symbol, "D", history_limit)
-    if df is None or len(df) < 274:
+    if df is None or len(df) < MIN_OHLCV_BARS:
         return {
             "symbol": symbol,
             "name": name,
@@ -544,10 +564,10 @@ def _analyze_symbol(
 
     avg_turnover_20 = float((df["close"] * df["volume"]).tail(20).mean())
     volatility_20d = float(df["close"].pct_change().tail(20).std()) if len(df) >= 21 else None
-    momentum_3m = _period_return(df["close"], 63)
-    momentum_6m = _period_return(df["close"], 126)
-    momentum_12m = _period_return(df["close"], 252)
-    momentum_12_1 = _skip_period_return(df["close"], 252, 21)
+    momentum_3m = _period_return(df["close"], MOMENTUM_PERIOD_3M)
+    momentum_6m = _period_return(df["close"], MOMENTUM_PERIOD_6M)
+    momentum_12m = _period_return(df["close"], MOMENTUM_PERIOD_12M)
+    momentum_12_1 = _skip_period_return(df["close"], MOMENTUM_PERIOD_12M, MOMENTUM_SKIP_DAYS)
 
     price_momentum_raw = _weighted_average(
         [
@@ -561,6 +581,8 @@ def _analyze_symbol(
     institutional_result = {"score": 0, "detail": "disabled"}
     inst_weight = float(portfolio_config.get("score_weights", {}).get("institutional_flow", 0))
     if inst_weight > 0 and strategy.get("use_institutional", True) and hasattr(source, "fetch_institutional"):
+        # WARNING: fetch_institutional() 未傳遞 as_of 截斷。
+        # 目前 weight=0% 安全隔離。若啟用此因子，必須先實作 as_of 注入（P4.7）。
         institutional_df = source.fetch_institutional(symbol)
         institutional_result = score_institutional(institutional_df)
     institutional_raw = float(institutional_result.get("score", 0))
@@ -570,6 +592,8 @@ def _analyze_symbol(
     quality_raw = None
     score_weights = portfolio_config.get("score_weights", {})
     if float(score_weights.get("quality", 0)) > 0 and hasattr(source, "fetch_financial_quality"):
+        # WARNING: fetch_financial_quality() 未傳遞 as_of 截斷。
+        # 目前 weight=0% 安全隔離。若啟用此因子，必須先實作 as_of 注入（P4.7）。
         fq = source.fetch_financial_quality(symbol)
         if fq is not None:
             roe = fq.get("roe")
@@ -680,6 +704,11 @@ def _rank_analyses(analyses: list[dict], portfolio_config: dict) -> list[dict]:
             active_weights[score_name] = weight
 
     weight_sum = sum(active_weights.values()) or 1.0
+    logger.info(
+        "Active factors: %s (weight_sum=%.2f)",
+        {k: f"{v/weight_sum:.0%}" for k, v in active_weights.items()},
+        weight_sum,
+    )
     for item in eligible_items:
         symbol = item["symbol"]
         score_total = 0.0
@@ -706,6 +735,14 @@ def _rank_analyses(analyses: list[dict], portfolio_config: dict) -> list[dict]:
 
     for index, item in enumerate(all_ranked, start=1):
         item["rank"] = index
+
+    top_display = min(10, len(all_ranked))
+    if top_display > 0:
+        logger.info(
+            "Top %d ranked: %s",
+            top_display,
+            [(r["symbol"], r.get("portfolio_score", 0)) for r in all_ranked[:top_display]],
+        )
 
     return all_ranked
 
@@ -767,6 +804,19 @@ def _select_positions(
     if len(selected) > top_n:
         selected = selected[:top_n]
         selected_symbols = {item["symbol"] for item in selected}
+
+    # Log if top-ranked new candidates were excluded by hold buffer
+    if len(selected) >= top_n:
+        skipped_top = [
+            c for c in eligible
+            if c["symbol"] not in selected_symbols and c["rank"] <= top_n
+        ]
+        if skipped_top:
+            logger.info(
+                "Hold buffer: %d top-ranked new candidates excluded: %s",
+                len(skipped_top),
+                [c["symbol"] for c in skipped_top],
+            )
 
     # Step 1.5: 產業硬限制 — 超額產業中分數最低者移除
     if max_same_industry > 0:
@@ -903,12 +953,16 @@ def _select_positions(
         )
 
     # 估算換倉成本，納入 ENTER / EXIT / ADD / REDUCE 的實際權重變化
-    turnover_cost = float(portfolio_config.get("turnover_cost", TW_STOCK_ROUND_TRIP_COST))
+    turnover_cost = float(portfolio_config.get("turnover_cost", TW_ROUND_TRIP_COST))
     slippage_bps = float(portfolio_config.get("slippage_bps", 5))
     estimated_turnover = _estimate_rebalance_turnover(current_positions, positions)
     estimated_cost = estimated_turnover * turnover_cost + estimated_turnover * 2 * (slippage_bps / 10000.0)
 
     cash_weight = round(max(0.0, 1.0 - total_weight), 4)
+    logger.info(
+        "Selection result: %d entries, %d holds, %d exits, exposure=%.1f%%, cash=%.1f%%",
+        len(entries), len(holds), len(exits), total_weight * 100, cash_weight * 100,
+    )
     notes = [
         f"market_state={market_view['signal']}",
         f"gross_exposure_target={exposure:.0%}",
@@ -948,6 +1002,10 @@ def _cap_and_redistribute(
             break
         uncapped = [sym for sym in weights if sym not in capped_symbols and weights[sym] < max_weight]
         if not uncapped:
+            logger.warning(
+                "Weight capping: %.4f excess could not be redistributed (all positions at cap %.2f)",
+                excess, max_weight,
+            )
             break
         per_share = excess / len(uncapped)
         for sym in uncapped:
@@ -1043,9 +1101,10 @@ def _metric_ranks(items: list[dict], key: str) -> tuple[dict[str, float], bool]:
     nan_count = len(items) - len(values)
     if nan_count > len(items) * 0.5:
         logger.warning(
-            "Factor '%s': %d/%d stocks have NaN/Inf (>50%%) — ranking may be unreliable",
+            "Factor '%s': %d/%d stocks have NaN/Inf (>50%%) — marking as unreliable",
             key, nan_count, len(items),
         )
+        return ({item["symbol"]: 0.5 for item in items}, False)
 
     series = pd.Series(values, dtype="float64")
     ranks = series.rank(pct=True, ascending=True, method="average")
@@ -1136,9 +1195,9 @@ def _monthly_revenue_momentum(
     # 過濾尚未公開的營收資料（避免 look-ahead bias）
     # 台股月營收法定公告期限為次月 10 日前
     # FinMind date 欄位為營收月份（如 2026-01-01 表示一月營收）
-    # P0-8: 使用 35 天延遲（次月底 + 5 天緩衝），原 40 天偏保守會浪費可用資料
+    # P0-8: 使用 REVENUE_LAG_DAYS 天延遲（次月底 + 5 天緩衝），原 40 天偏保守會浪費可用資料
     as_of_ts = pd.Timestamp(as_of).tz_localize(None) if pd.Timestamp(as_of).tzinfo else pd.Timestamp(as_of)
-    cutoff = as_of_ts - pd.Timedelta(days=35)
+    cutoff = as_of_ts - pd.Timedelta(days=REVENUE_LAG_DAYS)
     working = working[working["date"] <= cutoff]
     if working.empty:
         return None, None, None
