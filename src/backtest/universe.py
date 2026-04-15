@@ -160,7 +160,14 @@ class HistoricalUniverse:
         if pre_filter_size > 0:
             try:
                 from src.data.twse_scraper import fetch_combined_turnover
-                _twse_turnover = fetch_combined_turnover(as_of)
+                # 歷史日期時，讓 fetch_combined_turnover 直接從 OHLCV cache 計算 turnover
+                ohlcv_src = source.fetch_ohlcv if source is not None and hasattr(source, "fetch_ohlcv") else None
+                candidate_ids = working["stock_id"].astype(str).tolist()
+                _twse_turnover = fetch_combined_turnover(
+                    as_of,
+                    ohlcv_source=ohlcv_src,
+                    stock_ids=candidate_ids,
+                )
             except Exception as _exc:
                 logger.warning("TWSE scraper import/call failed: %s", _exc)
 

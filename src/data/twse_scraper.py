@@ -12,8 +12,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
+import pandas as pd
 import requests
 import urllib3
+
+from src.utils.constants import TW_TZ
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -161,17 +164,97 @@ def fetch_tpex_turnover(as_of: datetime) -> dict[str, float]:
     return {}
 
 
-def fetch_combined_turnover(as_of: datetime) -> dict[str, float]:
+def _cache_based_turnover(
+    as_of: datetime,
+    stock_ids: list[str] | None,
+    ohlcv_source,
+    lookback_days: int = 20,
+) -> dict[str, float]:
+    """從 OHLCV cache 計算歷史 turnover（close × volume 的近 N 日平均）。
+
+    用於回測時的 pre-filter：STOCK_DAY_ALL 只回當日快照，歷史日期必失敗，
+    改用每支股票的 cache 直接計算即可得到任意歷史日期的 turnover。
+
+    Parameters
+    ----------
+    as_of : datetime
+        查詢日（回測的 rebalance 日期）
+    stock_ids : list[str] | None
+        候選股票 ID 清單。若為 None 則跳過（無法掃）
+    ohlcv_source : Callable
+        可接受 (symbol, timeframe, limit) 的函式，通常是 source.fetch_ohlcv
+    lookback_days : int
+        計算均值的日數（預設 20 個交易日）
+    """
+    if not stock_ids or ohlcv_source is None:
+        return {}
+
+    as_of_ts = pd.Timestamp(as_of)
+    if as_of_ts.tz is None:
+        as_of_ts = as_of_ts.tz_localize("UTC")
+    else:
+        as_of_ts = as_of_ts.tz_convert("UTC")
+
+    result: dict[str, float] = {}
+    # 抓每支股票足夠的歷史資料（lookback_days × 2 天的日曆日 buffer，對應 ~lookback_days 交易日）
+    fetch_limit = max(60, lookback_days * 3)
+
+    for sid in stock_ids:
+        try:
+            df = ohlcv_source(str(sid), "D", fetch_limit)
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        if "close" not in df.columns or "volume" not in df.columns:
+            continue
+        # 截到 as_of 日 (含)
+        df_slice = df[df.index <= as_of_ts]
+        if len(df_slice) < 5:
+            continue
+        recent = df_slice.tail(lookback_days)
+        turnover = (recent["close"] * recent["volume"]).mean()
+        if pd.notna(turnover) and turnover > 0:
+            result[str(sid)] = float(turnover)
+
+    return result
+
+
+def fetch_combined_turnover(
+    as_of: datetime,
+    ohlcv_source=None,
+    stock_ids: list[str] | None = None,
+) -> dict[str, float]:
     """Return merged TWSE + TPEX turnover for all Taiwan stocks on or near as_of.
+
+    對 as_of 接近今天（< 2 天）時，優先打 TWSE/TPEX 當日 API（跟 live 模式一致）。
+    對歷史日期（回測使用），直接從 OHLCV cache 計算近 20 日平均 close×volume。
 
     TPEX failure is non-fatal; TWSE alone is sufficient to identify the
     highest-turnover large-caps (which are all TWSE-listed).
     """
+    # 判斷是否為歷史日期（相對今天 >= 2 天前視為歷史）
+    now = datetime.now(TW_TZ)
+    as_of_tz = as_of if as_of.tzinfo else as_of.replace(tzinfo=TW_TZ)
+    days_ago = (now - as_of_tz).days
+
+    # 歷史日期：從 cache 計算
+    if days_ago >= 2 and ohlcv_source is not None and stock_ids:
+        cached = _cache_based_turnover(as_of, stock_ids, ohlcv_source)
+        if cached:
+            logger.info(
+                "Combined turnover (from OHLCV cache): %d stocks near %s",
+                len(cached), as_of.strftime("%Y-%m-%d"),
+            )
+            return cached
+        # cache 全空才 fallback 到 API（理論上不會發生）
+
+    # 接近今天 或 沒有 cache source：打 API
     twse = fetch_twse_turnover(as_of)
     tpex = fetch_tpex_turnover(as_of)
     combined = {**tpex, **twse}  # TWSE wins on duplicate keys
     logger.info(
-        "Combined turnover: %d TWSE + %d TPEX = %d total stocks near %s",
+        "Combined turnover (from API): %d TWSE + %d TPEX = %d total stocks near %s",
         len(twse), len(tpex), len(combined), as_of.strftime("%Y-%m-%d"),
     )
     return combined
