@@ -10,6 +10,7 @@ are never excluded due to missing OHLCV cache.
 from __future__ import annotations
 
 import logging
+import pathlib
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -164,10 +165,37 @@ def fetch_tpex_turnover(as_of: datetime) -> dict[str, float]:
     return {}
 
 
+# Process-level cache：把每支股票的「日期 -> close*volume」series 存成 dict
+# 第一次讀某支股票時 load pkl 並計算 turnover series（一次性），之後 rebalance 直接切片。
+# 整個回測 run（甚至 walk-forward 跨 window）共享。
+_TURNOVER_SERIES_CACHE: dict[str, "pd.Series"] = {}
+
+
+def _load_turnover_series(stock_id: str, ohlcv_dir: pathlib.Path) -> "pd.Series | None":
+    """讀 stock_id.pkl 並回傳 close*volume 序列（index = UTC date）。失敗回 None。"""
+    if stock_id in _TURNOVER_SERIES_CACHE:
+        return _TURNOVER_SERIES_CACHE[stock_id]
+    pkl = ohlcv_dir / f"{stock_id}.pkl"
+    if not pkl.exists():
+        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+        return None
+    try:
+        df = pd.read_pickle(pkl)
+    except Exception:
+        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+        return None
+    if df is None or df.empty or "close" not in df.columns or "volume" not in df.columns:
+        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+        return None
+    series = (df["close"] * df["volume"]).dropna()
+    _TURNOVER_SERIES_CACHE[stock_id] = series
+    return series
+
+
 def _cache_based_turnover(
     as_of: datetime,
     stock_ids: list[str] | None,
-    ohlcv_source,
+    ohlcv_source=None,  # 保留參數簽名相容，但不再使用
     lookback_days: int = 20,
 ) -> dict[str, float]:
     """從 OHLCV cache 計算歷史 turnover（close × volume 的近 N 日平均）。
@@ -175,18 +203,11 @@ def _cache_based_turnover(
     用於回測時的 pre-filter：STOCK_DAY_ALL 只回當日快照，歷史日期必失敗，
     改用每支股票的 cache 直接計算即可得到任意歷史日期的 turnover。
 
-    Parameters
-    ----------
-    as_of : datetime
-        查詢日（回測的 rebalance 日期）
-    stock_ids : list[str] | None
-        候選股票 ID 清單。若為 None 則跳過（無法掃）
-    ohlcv_source : Callable
-        可接受 (symbol, timeframe, limit) 的函式，通常是 source.fetch_ohlcv
-    lookback_days : int
-        計算均值的日數（預設 20 個交易日）
+    為了 walk-forward 大量 rebalance 的效能，把每支股票的 close*volume series
+    讀進 module-level cache（_TURNOVER_SERIES_CACHE），之後 rebalance 直接切片
+    不需要重讀 pkl。
     """
-    if not stock_ids or ohlcv_source is None:
+    if not stock_ids:
         return {}
 
     as_of_ts = pd.Timestamp(as_of)
@@ -195,27 +216,30 @@ def _cache_based_turnover(
     else:
         as_of_ts = as_of_ts.tz_convert("UTC")
 
-    result: dict[str, float] = {}
-    # 抓每支股票足夠的歷史資料（lookback_days × 2 天的日曆日 buffer，對應 ~lookback_days 交易日）
-    fetch_limit = max(60, lookback_days * 3)
+    # 解析 cache 目錄（與 finmind.FinMindSource 同樣邏輯）
+    import os as _os
+    _cache_env = _os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
+    ohlcv_dir = pathlib.Path(_cache_env) / "ohlcv"
+    if not ohlcv_dir.exists():
+        # Windows 本機 fallback：相對專案根目錄
+        proj_root = pathlib.Path(__file__).resolve().parent.parent.parent
+        ohlcv_dir = proj_root / "data" / "cache" / "ohlcv"
+    if not ohlcv_dir.exists():
+        return {}
 
+    result: dict[str, float] = {}
     for sid in stock_ids:
-        try:
-            df = ohlcv_source(str(sid), "D", fetch_limit)
-        except Exception:
+        sid = str(sid)
+        series = _load_turnover_series(sid, ohlcv_dir)
+        if series is None or series.empty:
             continue
-        if df is None or df.empty:
+        # 切到 as_of (含)
+        recent = series[series.index <= as_of_ts].tail(lookback_days)
+        if len(recent) < 5:
             continue
-        if "close" not in df.columns or "volume" not in df.columns:
-            continue
-        # 截到 as_of 日 (含)
-        df_slice = df[df.index <= as_of_ts]
-        if len(df_slice) < 5:
-            continue
-        recent = df_slice.tail(lookback_days)
-        turnover = (recent["close"] * recent["volume"]).mean()
-        if pd.notna(turnover) and turnover > 0:
-            result[str(sid)] = float(turnover)
+        avg = recent.mean()
+        if pd.notna(avg) and avg > 0:
+            result[sid] = float(avg)
 
     return result
 
