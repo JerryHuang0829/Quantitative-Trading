@@ -248,7 +248,7 @@ class FinMindSource(DataSource):
 
         # Backtest mode: historical data is immutable — use cache as-is, skip all refresh.
         if self._backtest_mode and cached is not None and not cached.empty:
-            start_ts = pd.Timestamp(want_start, tz="UTC")
+            start_ts = pd.Timestamp(want_start).tz_convert("UTC")
             result = cached[cached.index >= start_ts]
             result = result[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
             return result if not result.empty else None
