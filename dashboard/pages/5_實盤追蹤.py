@@ -6,9 +6,10 @@ import pandas as pd
 import json
 import sys
 from pathlib import Path
+from datetime import date
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from utils import PROJECT_ROOT
+from utils import PROJECT_ROOT, load_latest_close
 
 REAL_TRADING_DIR = PROJECT_ROOT / "reports" / "real_trading"
 PORTFOLIO_FILE = REAL_TRADING_DIR / "portfolio.json"
@@ -31,32 +32,96 @@ trades = _load(TRADES_FILE)
 performance = _load(PERFORMANCE_FILE)
 
 if not portfolio and not trades:
-    st.info("尚未開始投資。4/13（週一）開始的話，按照以下步驟：")
+    st.info("尚未開始實盤投資。開始記錄方法：")
     st.markdown("""
     ```bash
-    # 1. 取得本月建議
-    docker compose run --rm --entrypoint python portfolio-bot scripts/paper_trade.py
+    # 在券商 APP 用零股交易買入後，記錄交易
+    python scripts/real_trade.py buy 2330 12 580.0
 
-    # 2. 在券商 APP 用零股交易買入（盤後 13:40-14:30）
-
-    # 3. 記錄你買了什麼
-    python scripts/real_trade.py buy 2360 12 158.5
-
-    # 4. 查看持股
+    # 查看持股
     python scripts/real_trade.py status
     ```
     """)
     st.stop()
 
-# --- 目前持股 ---
+# --- 目前持股（含現值損益）---
 if portfolio:
     st.subheader("目前持股")
-    total_cost = 0
-    for symbol, info in sorted(portfolio.items()):
-        total_cost += info["total_cost"]
-        st.markdown(f"**{symbol}** — {info['shares']} 股，均價 {info['avg_cost']:.1f} 元，成本 {info['total_cost']:,.0f} 元")
 
-    st.metric("總投入", f"{total_cost:,.0f} 元")
+    today = date.today().isoformat()
+    rows = []
+    total_cost = 0.0
+    total_value = 0.0
+    any_price_missing = False
+
+    for symbol, info in sorted(portfolio.items()):
+        shares = info["shares"]
+        avg_cost = info["avg_cost"]
+        cost = info["total_cost"]
+        total_cost += cost
+
+        latest_price = load_latest_close(symbol)
+        if latest_price:
+            market_value = latest_price * shares
+            pnl = market_value - cost
+            pnl_pct = pnl / cost if cost > 0 else 0
+            total_value += market_value
+            rows.append({
+                "股票": symbol,
+                "股數": shares,
+                "均價": f"{avg_cost:.1f}",
+                "現價": f"{latest_price:.1f}",
+                "成本": f"{cost:,.0f}",
+                "現值": f"{market_value:,.0f}",
+                "損益": f"{pnl:+,.0f}",
+                "損益率": f"{pnl_pct:+.1%}",
+                "_pnl": pnl,
+            })
+        else:
+            any_price_missing = True
+            total_value += cost  # 無法取得時用成本代替
+            rows.append({
+                "股票": symbol,
+                "股數": shares,
+                "均價": f"{avg_cost:.1f}",
+                "現價": "—",
+                "成本": f"{cost:,.0f}",
+                "現值": "—",
+                "損益": "—",
+                "損益率": "—",
+                "_pnl": 0,
+            })
+
+    if any_price_missing:
+        st.caption("⚠️ 部分股票無法取得最新收盤價（可能今日未交易）")
+
+    # 顯示 DataFrame（去掉 _pnl 欄）
+    display_df = pd.DataFrame(rows).drop(columns=["_pnl"])
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # 總覽指標
+    total_pnl = total_value - total_cost
+    total_pnl_pct = total_pnl / total_cost if total_cost > 0 else 0
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("總投入成本", f"{total_cost:,.0f} 元")
+    col2.metric("目前市值", f"{total_value:,.0f} 元")
+    col3.metric("總損益", f"{total_pnl:+,.0f} 元", delta=f"{total_pnl_pct:+.1%}")
+
+    # 個股損益長條圖
+    if any(r["損益"] != "—" for r in rows):
+        fig = go.Figure(go.Bar(
+            x=[r["股票"] for r in rows if r["損益"] != "—"],
+            y=[r["_pnl"] for r in rows if r["損益"] != "—"],
+            marker_color=["#2ecc71" if r["_pnl"] >= 0 else "#e74c3c" for r in rows if r["損益"] != "—"],
+            hovertemplate="%{x}<br>損益：%{y:+,.0f} 元",
+        ))
+        fig.update_layout(
+            yaxis_title="損益（元）",
+            height=250, margin=dict(t=10, b=20),
+        )
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.4)
+        st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 

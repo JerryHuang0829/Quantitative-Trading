@@ -17,25 +17,19 @@ st.title("📈 策略過去賺了多少？")
 # --- 回測選擇 ---
 experiments = list_backtest_experiments()
 if not experiments:
-    st.warning("尚無回測結果。")
+    st.warning("尚無回測結果。請先執行：")
+    st.code("docker compose run --rm backtest --start 2022-01-01 --end 2025-12-31 --benchmark 0050")
     st.stop()
 
-IMPORTANT = ["dashboard_4y", "split_fix", "p2_if0", "oos_2019_2020", "dashboard_6m"]
-sorted_exp = sorted(experiments, key=lambda x: (x["subdir"] not in IMPORTANT, x["label"]))
+# 有 daily_returns 的優先排前面（圖表更完整）
+sorted_exp = sorted(experiments, key=lambda x: (not x["has_daily"], x["start"]))
 
-# 友善標籤
-friendly_names = {
-    "dashboard_4y": "📊 完整 4 年（2022-2025）推薦",
-    "dashboard_6m": "📊 最近半年（2024 下半）",
-    "oos_2019_2020": "📊 2019-2020（含疫情）",
-}
-
-labels = []
-for e in sorted_exp:
-    friendly = friendly_names.get(e["subdir"])
-    labels.append(friendly if friendly else e["label"])
-
-selected_idx = st.sidebar.selectbox("選擇回測區間", range(len(labels)), format_func=lambda i: labels[i], index=0)
+selected_idx = st.sidebar.selectbox(
+    "選擇回測區間",
+    range(len(sorted_exp)),
+    format_func=lambda i: ("📊 " if sorted_exp[i]["has_daily"] else "") + sorted_exp[i]["label"],
+    index=0,
+)
 selected = sorted_exp[selected_idx]
 
 metrics = load_backtest_metrics(selected["subdir"], selected["start"], selected["end"])
@@ -70,7 +64,11 @@ with col2:
 
 with col3:
     st.metric("最大回撤", f"{mdd:.1%}")
-    st.caption(f"最慘時期：100 萬會暫時變成 {100 + mdd * 100:.0f} 萬")
+    if mdd < 0:
+        remain = 100 + mdd * 100
+        st.caption(f"最慘時期：100 萬會暫時變成 {remain:.0f} 萬")
+    else:
+        st.caption("無顯著回撤")
 
 st.divider()
 
@@ -96,7 +94,6 @@ if daily and "portfolio" in daily:
         bench_rets = pd.Series(daily["benchmark"], dtype=float)
         bench_rets.index = pd.to_datetime(bench_rets.index)
         bench_rets = bench_rets.sort_index()
-        # 對齊到策略的時間範圍
         start_date = port_rets.index.min()
         bench_rets = bench_rets[bench_rets.index >= start_date]
         if not bench_rets.empty:
@@ -140,11 +137,11 @@ if daily and "portfolio" in daily:
     st.plotly_chart(fig_dd, use_container_width=True)
 
 else:
-    st.info("此回測尚無日頻資料。左側選擇有 📊 標記的回測可看完整圖表。")
+    st.info("此回測尚無日頻資料（需包含 `daily_returns.json`）。")
 
 st.divider()
 
-# --- 更多數字（摺疊，想看的人才展開）---
+# --- 更多數字（摺疊）---
 with st.expander("📊 完整績效指標（進階）"):
     col_a, col_b, col_c, col_d = st.columns(4)
     col_a.metric("Sharpe", f"{metrics.get('sharpe_ratio', 0):.2f}")
