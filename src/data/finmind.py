@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from .base import DataSource
-from ..utils.constants import TW_TZ
+from ..utils.constants import TW_TZ, to_utc_ts
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,24 @@ _WIDE_LOOKBACK_DAYS = 4000
 # ---------------------------------------------------------------------------
 # Persistent disk cache
 # ---------------------------------------------------------------------------
+
+class _DiskCacheCorruptedError(RuntimeError):
+    """Raised when a cache file exists but cannot be deserialized.
+
+    In backtest mode this is fatal: silently falling through to live API
+    breaks PIT / reproducibility. Callers in backtest mode must not catch.
+    """
+
+
+class _BacktestCacheMissError(RuntimeError):
+    """Raised when a cache miss occurs under backtest_mode=True.
+
+    Backtest runs must be fully reproducible from the disk cache — any
+    fall-through to a live API/scraper would make results depend on
+    network state at replay time. Callers MUST NOT catch this; seed the
+    cache first (run once in live mode) then replay.
+    """
+
 
 class _DiskCache:
     """Append-only persistent cache using pickle files.
@@ -59,7 +77,16 @@ class _DiskCache:
         safe = symbol.replace("/", "_").replace("\\", "_")
         return subdir / f"{safe}.pkl"
 
-    def load(self, dataset: str, symbol: str = "_global") -> pd.DataFrame | None:
+    def load(
+        self, dataset: str, symbol: str = "_global", *, strict: bool = False
+    ) -> pd.DataFrame | None:
+        """Load cached DataFrame; returns None if file missing.
+
+        strict=True (use in backtest mode): corrupted file → raise
+        _DiskCacheCorruptedError. Prevents silent fallback to live API.
+        strict=False (default, live mode): corrupted file → warn + None,
+        caller will refetch from API.
+        """
         key = f"{dataset}:{symbol}"
         if key in self._mem:
             return self._mem[key]
@@ -72,6 +99,10 @@ class _DiskCache:
             return df
         except Exception as exc:
             logger.warning("Cache read failed for %s (keeping file): %s", path, exc)
+            if strict:
+                raise _DiskCacheCorruptedError(
+                    f"Cache file {path} exists but cannot be read: {exc}"
+                ) from exc
             return None
 
     def save(self, dataset: str, df: pd.DataFrame, symbol: str = "_global") -> None:
@@ -147,7 +178,12 @@ class FinMindSource(DataSource):
         self._backtest_mode = backtest_mode
 
         if cache_dir is None:
-            cache_dir = os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
+            # Shared resolver matches twse_scraper / backtest.universe so a
+            # workstation without DATA_CACHE_DIR still finds <repo>/data/cache
+            # instead of creating an empty /app/data/cache that silently
+            # looks like "0 cached stocks".
+            from ..utils.paths import resolve_cache_dir
+            cache_dir = str(resolve_cache_dir())
         self._disk = _DiskCache(cache_dir)
 
         if token:
@@ -244,11 +280,19 @@ class FinMindSource(DataSource):
         end_str = now.strftime("%Y-%m-%d")
         want_start = now - timedelta(days=int(limit * 1.8))
 
-        cached = self._disk.load("ohlcv", symbol)
+        cached = self._disk.load("ohlcv", symbol, strict=self._backtest_mode)
 
         # Backtest mode: historical data is immutable — use cache as-is, skip all refresh.
-        if self._backtest_mode and cached is not None and not cached.empty:
-            start_ts = pd.Timestamp(want_start).tz_convert("UTC")
+        # Cache miss (or empty) MUST raise, not fall through to live API: a silent
+        # refetch breaks PIT reproducibility and makes replay network-dependent.
+        if self._backtest_mode:
+            if cached is None or cached.empty:
+                raise _BacktestCacheMissError(
+                    f"ohlcv cache miss for {symbol} in backtest_mode "
+                    f"(want_start={want_start.date()}, limit={limit}); "
+                    f"seed the cache in live mode before replay."
+                )
+            start_ts = to_utc_ts(want_start)
             result = cached[cached.index >= start_ts]
             result = result[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
             return result if not result.empty else None
@@ -266,7 +310,7 @@ class FinMindSource(DataSource):
             # With _WIDE_LOOKBACK_DAYS=4000, any first fetch already covers 11 years.
             # For existing symbols cached before this setting, 1000+ rows is sufficient
             # for any 3Y+ backtest — the slicer truncates to the actual backtest window.
-            cached_in_range = cached[cached.index >= pd.Timestamp(want_start).tz_convert("UTC")]
+            cached_in_range = cached[cached.index >= to_utc_ts(want_start)]
             if len(cached) < 252 and c_min > req_start + pd.Timedelta(days=1):
                 old = self._api_fetch_ohlcv(
                     symbol,
@@ -310,7 +354,7 @@ class FinMindSource(DataSource):
             self._disk.save("ohlcv", cached, symbol)
 
         # Slice to the requested range
-        start_ts = pd.Timestamp(want_start, tz="UTC")
+        start_ts = to_utc_ts(want_start)
         result = cached[cached.index >= start_ts]
         result = result[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
         return result if not result.empty else None
@@ -341,10 +385,17 @@ class FinMindSource(DataSource):
         now = datetime.now(TW_TZ)
         end_str = now.strftime("%Y-%m-%d")
 
-        cached = self._disk.load("institutional", symbol)
+        cached = self._disk.load("institutional", symbol, strict=self._backtest_mode)
 
-        # Backtest mode: use cache as-is, skip all refresh.
-        if self._backtest_mode and cached is not None:
+        # Backtest mode: use cache as-is, skip all refresh. Empty cache is a
+        # valid sentinel ("no inst data for this symbol") seeded in a prior
+        # live run. Truly missing (None) is a replay error — raise.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    f"institutional cache miss for {symbol} in backtest_mode "
+                    f"(days={days}); seed the cache in live mode before replay."
+                )
             if cached.empty:
                 return None
             return cached.sort_values("date") if "date" in cached.columns else cached
@@ -428,10 +479,16 @@ class FinMindSource(DataSource):
         now = datetime.now(TW_TZ)
         end_str = now.strftime("%Y-%m-%d")
 
-        cached = self._disk.load("revenue", symbol)
+        cached = self._disk.load("revenue", symbol, strict=self._backtest_mode)
 
-        # Backtest mode: use cache as-is, skip all refresh.
-        if self._backtest_mode and cached is not None:
+        # Backtest mode: use cache as-is, skip all refresh / TWSE fallback.
+        # Missing cache (None) → raise; empty sentinel is valid.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    f"month_revenue cache miss for {symbol} in backtest_mode "
+                    f"(months={months}); seed the cache in live mode before replay."
+                )
             if cached.empty:
                 return None
             return cached
@@ -527,10 +584,17 @@ class FinMindSource(DataSource):
 
     def fetch_stock_info(self) -> pd.DataFrame | None:
         # Snapshot dataset — cache with 7-day TTL
-        cached = self._disk.load("stock_info")
+        cached = self._disk.load("stock_info", strict=self._backtest_mode)
 
-        # Backtest mode: use cache as-is, skip TTL check.
-        if self._backtest_mode and cached is not None:
+        # Backtest mode: use cache as-is, skip TTL check. Missing cache must
+        # raise — falling through to loader.taiwan_stock_info() would yield
+        # today's snapshot instead of the as-of snapshot.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    "stock_info cache miss in backtest_mode; "
+                    "seed the cache in live mode before replay."
+                )
             self._ensure_stock_info_csv(cached)
             return cached
 
@@ -598,10 +662,17 @@ class FinMindSource(DataSource):
 
     def fetch_market_value(self, days: int = 10) -> pd.DataFrame | None:
         # Snapshot dataset — cache with 3-day TTL
-        cached = self._disk.load("market_value")
+        cached = self._disk.load("market_value", strict=self._backtest_mode)
 
-        # Backtest mode: use cache as-is, skip TTL check.
-        if self._backtest_mode and cached is not None:
+        # Backtest mode: use cache as-is, skip TTL check / TWSE recompute.
+        # Missing cache must raise — `_compute_market_value_from_twse` would
+        # otherwise hit the live TWSE OpenAPI for today's shares-outstanding.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    f"market_value cache miss in backtest_mode (days={days}); "
+                    f"seed the cache in live mode before replay."
+                )
             return cached
 
         meta = self._disk.meta("market_value")
@@ -651,7 +722,14 @@ class FinMindSource(DataSource):
             # file deletion on pickle version incompatibility (Windows).
             try:
                 df = pd.read_pickle(pkl_path)
-            except Exception:
+            except Exception as exc:
+                # Backtest mode: corrupt cache must not silently skip —
+                # that would make market-value ranking depend on which
+                # files happen to be readable, breaking PIT reproducibility.
+                if self._backtest_mode:
+                    raise _DiskCacheCorruptedError(
+                        f"OHLCV cache {pkl_path} corrupted in backtest mode: {exc}"
+                    ) from exc
                 continue
             if df is None or df.empty or "close" not in df.columns:
                 continue
@@ -717,10 +795,17 @@ class FinMindSource(DataSource):
     # -------------------------------------------------------------- Delisting
 
     def fetch_delisting(self) -> pd.DataFrame | None:
-        cached = self._disk.load("delisting")
+        cached = self._disk.load("delisting", strict=self._backtest_mode)
 
-        # Backtest mode: use cache as-is, skip TTL check.
-        if self._backtest_mode and cached is not None:
+        # Backtest mode: use cache as-is, skip TTL check. Missing cache must
+        # raise — the live FinMind delisting endpoint reflects today's state,
+        # which leaks post-as-of delistings into historical replay.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    "delisting cache miss in backtest_mode; "
+                    "seed the cache in live mode before replay."
+                )
             return cached
 
         meta = self._disk.meta("delisting")
@@ -750,7 +835,19 @@ class FinMindSource(DataSource):
         快取 90 天（季報每季才更新）。
         """
         cache_key = f"quality:{symbol}"
-        cached = self._disk.load("quality", symbol)
+        cached = self._disk.load("quality", symbol, strict=self._backtest_mode)
+
+        # Backtest mode: quality snapshots must come from cache only — the
+        # live FinMind statement/balance-sheet endpoints return whatever
+        # quarter is most recent at replay time, not the as-of quarter.
+        if self._backtest_mode:
+            if cached is None:
+                raise _BacktestCacheMissError(
+                    f"financial_quality cache miss for {symbol} in backtest_mode; "
+                    f"seed the cache in live mode before replay."
+                )
+            return cached.to_dict("records")[0] if hasattr(cached, "to_dict") else cached
+
         meta = self._disk.meta("quality", symbol)
         if cached is not None and meta:
             try:
@@ -866,7 +963,11 @@ class FinMindSource(DataSource):
 
         cache_path = self._disk._path("dividends")
 
-        # Try loading from disk cache
+        # Try loading from disk cache.
+        # Parity with _DiskCache.load(strict=backtest_mode): in backtest mode a
+        # corrupt pickle must raise (not silently fall through to live scrape),
+        # otherwise dividend-adjusted returns silently degrade to price-only
+        # for whatever years fail to deserialize.
         cached: list[dict] | None = None
         if cache_path.exists():
             try:
@@ -874,8 +975,17 @@ class FinMindSource(DataSource):
                     cached = _pkl.load(f)
             except Exception as exc:
                 logger.warning("Dividend cache read failed: %s", exc)
+                if self._backtest_mode:
+                    raise _DiskCacheCorruptedError(
+                        f"Dividend cache {cache_path} corrupted in backtest mode: {exc}"
+                    ) from exc
 
-        if self._backtest_mode and cached is not None:
+        if self._backtest_mode:
+            # Backtest: dividends must come from cache only. Returning None on
+            # miss is valid (callers treat as "no dividend data available for
+            # this window"); the key requirement is that we never reach the
+            # live TWSE scraper, which would make total-return backtests
+            # depend on scrape-time network state.
             return cached
 
         meta = self._disk.meta("dividends")

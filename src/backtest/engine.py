@@ -17,7 +17,7 @@ from ..portfolio.tw_stock import (
     get_portfolio_config,
 )
 from ..storage.database import compute_config_hash
-from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS, TW_ROUND_TRIP_COST
+from ..utils.constants import TECH_SUPPLY_CHAIN_KEYWORDS, TW_ROUND_TRIP_COST, to_utc_ts
 from .metrics import adjust_dividends, adjust_splits, compute_metrics, format_report
 from .universe import HistoricalUniverse
 
@@ -121,7 +121,7 @@ class _DataSlicer:
             self.set_as_of(as_of)
 
     def set_as_of(self, as_of: datetime) -> None:
-        self._as_of = pd.Timestamp(as_of, tz="UTC")
+        self._as_of = to_utc_ts(as_of)
 
     @property
     def _as_of_naive(self) -> pd.Timestamp | None:
@@ -430,6 +430,22 @@ class BacktestEngine:
             n_errors = sum(1 for a in analyses if any("analysis_error" in str(f) for f in a.get("filters", [])))
             n_eligible = sum(1 for a in analyses if a.get("eligible", False))
 
+            # Backtest analyze failure-rate guard（與 live tw_stock.py L294-304 對齊）。
+            # Live 在失敗率過高時 return None（跳過 rebalance）；backtest 則 raise，
+            # 讓研究者明確看到，而不是靜默保留舊持倉 / 空倉影響績效數字。
+            min_eligible_ratio = float(
+                self._portfolio_config.get("min_eligible_ratio", 0.3)
+            )
+            analyze_success = n_analyzed - n_errors
+            if n_analyzed > 0 and analyze_success / n_analyzed < min_eligible_ratio:
+                raise RuntimeError(
+                    f"Backtest analyze success rate too low at {rebal_date}: "
+                    f"{analyze_success}/{n_analyzed} "
+                    f"({analyze_success / n_analyzed:.1%}) < min "
+                    f"{min_eligible_ratio:.0%}. Silent degradation would distort "
+                    f"performance metrics; fix data before rerunning."
+                )
+
             ranked = _rank_analyses(analyses, self._portfolio_config)
 
             # 將目前持倉轉成 _select_positions 需要的格式
@@ -456,7 +472,7 @@ class BacktestEngine:
             if total_trade_cost > 0:
                 # 把交易成本記在再平衡當天（含首次建倉）
                 all_daily_returns.append(
-                    (pd.Timestamp(rebal_date, tz="UTC"), -total_trade_cost)
+                    (to_utc_ts(rebal_date), -total_trade_cost)
                 )
 
             current_holdings = new_holdings
@@ -615,6 +631,28 @@ class BacktestEngine:
         else:
             portfolio_daily = pd.Series(dtype="float64")
 
+        # --- 空倉日補 0.0（P4.7）---
+        # 原行為只記錄「有持倉」的日子，會讓年化分母 n_years 縮短，
+        # 高估年化報酬 / Sharpe。改成 reindex 到交易日曆並 fill 0.0，
+        # 讓 cash drag 日明確計入真實持有期間。
+        if rebalance_dates:
+            window_start = to_utc_ts(rebalance_dates[0])
+            window_end = to_utc_ts(end_date)
+            if benchmark_daily is not None and not benchmark_daily.empty:
+                # benchmark index 是精確的交易日曆（含假日）
+                bench_idx = benchmark_daily.index
+                in_window = bench_idx[(bench_idx >= window_start) & (bench_idx <= window_end)]
+            else:
+                # 無 benchmark：退化用 bdate_range（M-F，不含台股假日）— 會略高估
+                # 交易日數，但總比 silently drop 空倉日讓 n_years 縮短好。
+                logger.warning(
+                    "No benchmark available; using bdate_range for empty-holding fill "
+                    "(annualization may include non-trading weekdays)"
+                )
+                in_window = pd.bdate_range(window_start, window_end, tz="UTC")
+            if len(in_window) > 0:
+                portfolio_daily = portfolio_daily.reindex(in_window).fillna(0.0)
+
         # --- 計算 KPI ---
         metrics = compute_metrics(portfolio_daily, benchmark_daily)
         # Override benchmark_type if dividends were applied (P4.5)
@@ -666,8 +704,8 @@ class BacktestEngine:
         假設在 period_start 次一交易日以收盤價成交，
         之後每日以收盤價計算報酬，直到 period_end。
         """
-        start_ts = pd.Timestamp(period_start, tz="UTC")
-        end_ts = pd.Timestamp(period_end, tz="UTC")
+        start_ts = to_utc_ts(period_start)
+        end_ts = to_utc_ts(period_end)
 
         # 收集每個持倉的日報酬
         stock_daily_returns: dict[str, pd.Series] = {}

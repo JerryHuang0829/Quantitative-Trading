@@ -173,6 +173,20 @@ class HistoricalUniverse:
 
             if _twse_turnover and len(working) > pre_filter_size:
                 _before_pre = len(working)
+                # Coverage guard: 若 turnover dict 覆蓋率過低，強制失敗而非靜默
+                # 以 0.0 補齊大量股票會讓 top-N 排名變成隨機、靜默扭曲 universe
+                # （這是 2026-04-15 抓出的 alpha 幻覺根因）。
+                min_coverage = float(
+                    portfolio_config.get("auto_universe_pre_filter_min_coverage", 0.80)
+                )
+                coverage = len(_twse_turnover) / max(_before_pre, 1)
+                if coverage < min_coverage:
+                    raise RuntimeError(
+                        f"Pre-filter turnover coverage too low at {as_of}: "
+                        f"{len(_twse_turnover)}/{_before_pre} ({coverage:.1%}) "
+                        f"< min {min_coverage:.0%}. Cache likely incomplete for this "
+                        f"historical date. Rebuild cache or shorten backtest window."
+                    )
                 working["_twse_turnover"] = (
                     working["stock_id"].map(_twse_turnover).fillna(0.0)
                 )
@@ -184,15 +198,16 @@ class HistoricalUniverse:
                     .reset_index(drop=True)
                 )
                 logger.info(
-                    "Pre-filter: %d → %d stocks using TWSE turnover at %s",
+                    "Pre-filter: %d → %d stocks using TWSE turnover at %s (coverage %.1%%)",
                     _before_pre, len(working),
                     as_of.date() if hasattr(as_of, "date") else as_of,
+                    coverage * 100,
                 )
             elif not _twse_turnover:
-                logger.warning(
-                    "TWSE turnover unavailable at %s — skipping pre-filter, using all %d stocks",
-                    as_of.date() if hasattr(as_of, "date") else as_of,
-                    len(working),
+                raise RuntimeError(
+                    f"TWSE turnover unavailable at {as_of} — pre-filter cannot run. "
+                    f"This used to silently fall back to the full market and was the "
+                    f"root cause of prior alpha illusions. Fix the cache or data source."
                 )
 
         # --- 流動性排序與 size limit ---
@@ -214,15 +229,17 @@ class HistoricalUniverse:
             # 耗盡每小時 600 次配額，且導致 TSMC 等未快取大型股被排除在外。
             # 未在快取中的股票 size_proxy=0，自然排到尾端不入選 top_n。
             # 後續回測會逐漸填充快取，universe 品質隨時間提升。
-            import os as _os
-            _cache_env = _os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
-            _ohlcv_cache_dir = _os.path.join(_cache_env, "ohlcv")
+            # Use shared resolver: tries $DATA_CACHE_DIR → /app/data/cache →
+            # <repo>/data/cache. Previously this only honoured the env var and
+            # Docker path, so workstations without DATA_CACHE_DIR saw 0 cached
+            # stocks and silently fell back to stock_info order.
+            from src.utils.paths import resolve_cache_dir
+            _ohlcv_cache_dir = resolve_cache_dir() / "ohlcv"
             cached_syms: set[str] = set()
-            if _os.path.isdir(_ohlcv_cache_dir):
+            if _ohlcv_cache_dir.is_dir():
                 cached_syms = {
-                    f[:-4]  # strip .pkl
-                    for f in _os.listdir(_ohlcv_cache_dir)
-                    if f.endswith(".pkl")
+                    f.stem for f in _ohlcv_cache_dir.iterdir()
+                    if f.suffix == ".pkl"
                 }
             n_cached = sum(1 for sid in working["stock_id"] if str(sid) in cached_syms)
             logger.info(
@@ -231,26 +248,68 @@ class HistoricalUniverse:
                 as_of.date() if hasattr(as_of, "date") else as_of,
             )
             size_proxy: dict[str, float] = {}
+            cached_success = 0
+            cached_total = 0
+            failed_samples: list[str] = []
             for _, row in working.iterrows():
                 sym = str(row["stock_id"])
                 if sym not in cached_syms:
-                    size_proxy[sym] = 0.0  # 未快取，不發 API 呼叫
+                    size_proxy[sym] = 0.0  # 未快取，不發 API 呼叫（by design）
                     continue
+                cached_total += 1
                 try:
                     ohlcv = source.fetch_ohlcv(sym, "D", 30)
                     if ohlcv is not None and len(ohlcv) >= 5:
                         turnover = (ohlcv["close"] * ohlcv["volume"]).tail(20).mean()
-                        size_proxy[sym] = float(turnover) if pd.notna(turnover) else 0.0
-                    else:
-                        size_proxy[sym] = 0.0
-                except Exception:
+                        if pd.notna(turnover):
+                            size_proxy[sym] = float(turnover)
+                            cached_success += 1
+                            continue
                     size_proxy[sym] = 0.0
-            working["_size_proxy"] = working["stock_id"].map(size_proxy).fillna(0.0)
-            working = working.sort_values(
-                ["_size_proxy", "stock_id"], ascending=[False, True]
-            )
-            working = working.drop(columns=["_size_proxy"])
-            size_ranked = True
+                    if len(failed_samples) < 5:
+                        failed_samples.append(sym)
+                except Exception as _exc:
+                    size_proxy[sym] = 0.0
+                    if len(failed_samples) < 5:
+                        failed_samples.append(f"{sym}:{type(_exc).__name__}")
+            # Guard 設計（三層，避免字典序退化幻覺）：
+            #   a) cached_total == 0 → 此日期 cache 完全空，不算 size-ranked，
+            #      讓下面的 fallback warning 觸發（不偽稱已排序）。
+            #   b) cached_total > 0 but cached_success == 0 → 所有能讀的股票全失敗，
+            #      是 active 錯誤（cache 損壞或 fetch 全 raise）→ raise。
+            #   c) cached_total >= 10 且 rate < min → 統計顯著的大面積失敗 → raise。
+            #   d) 1 <= cached_total < 10 且至少 1 成功 → 接受（小樣本 best effort）。
+            if cached_total == 0:
+                logger.warning(
+                    "No cached OHLCV for any working stock at %s — "
+                    "size-proxy unusable, falling back to stock_info order",
+                    as_of.date() if hasattr(as_of, "date") else as_of,
+                )
+                # 不設 size_ranked=True；由下方 fallback 分支處理
+            else:
+                if cached_success == 0:
+                    raise RuntimeError(
+                        f"Backtest size-proxy: all {cached_total} cached stocks "
+                        f"failed at {as_of} (0 succeeded). Samples: {failed_samples[:5]}. "
+                        f"Cache likely corrupted or fetch_ohlcv broken."
+                    )
+                if cached_total >= 10:
+                    _success_rate = cached_success / cached_total
+                    _min_success = float(
+                        portfolio_config.get("auto_universe_size_proxy_min_success", 0.60)
+                    )
+                    if _success_rate < _min_success:
+                        raise RuntimeError(
+                            f"Backtest size-proxy success rate too low at {as_of}: "
+                            f"{cached_success}/{cached_total} ({_success_rate:.1%}) "
+                            f"< min {_min_success:.0%}. Samples: {failed_samples[:5]}."
+                        )
+                working["_size_proxy"] = working["stock_id"].map(size_proxy).fillna(0.0)
+                working = working.sort_values(
+                    ["_size_proxy", "stock_id"], ascending=[False, True]
+                )
+                working = working.drop(columns=["_size_proxy"])
+                size_ranked = True
 
         if not size_ranked:
             logger.warning(

@@ -12,7 +12,7 @@
 - **Drift-aware 日報酬**：持有期間權重隨股價自然漂移，消除固定權重回測的系統性高估
 - **Stock split 自動前復權**：偵測 >40% 單日跌幅（正分割）與 >100% 單日漲幅（合股），自動校正
 - **Rolling OOS 驗證**：11 個滾動樣本外視窗 + Bootstrap Sharpe 信賴區間（⚠️ 修正後 CI 跨 0，alpha 不顯著）
-- **161 個自動化測試**：覆蓋回測引擎、因子排名、選股邏輯、配息調整、drift-aware 等
+- **219 個自動化測試**：覆蓋回測引擎、因子排名、選股邏輯、配息調整、drift-aware、cache 路徑解析、backtest strict 模式等
 
 ## 架構
 
@@ -33,6 +33,7 @@ src/portfolio/tw_stock.py      核心選股引擎
         +--> src/backtest/universe.py     歷史 universe（含下市股）
         +--> src/strategy/regime.py       市場狀態偵測（ADX + SMA）
         +--> src/utils/constants.py       共用常數
+        +--> src/utils/paths.py           DATA_CACHE_DIR 路徑解析（resolve_cache_dir）
         +--> src/storage/database.py      SQLite 儲存
         +--> src/notify/telegram.py       Telegram 通知
 ```
@@ -106,14 +107,14 @@ src/portfolio/tw_stock.py      核心選股引擎
 | 資料庫 | SQLite |
 | 資料來源 | FinMind API、TWSE/TPEX 交易所爬蟲 |
 | 通知 | Telegram Bot |
-| 測試 | pytest（161 tests, 14 files） |
+| 測試 | pytest（219 tests） |
 
 ## 快速開始
 
 ```bash
 # 安裝
 pip install -r requirements.txt
-cp .env.example .env  # 設定 FINMIND_TOKEN
+cp .env.example .env  # 設定 FINMIND_TOKEN 與 DATA_CACHE_DIR（見下）
 
 # 執行測試
 python -m pytest tests/ -v
@@ -126,28 +127,23 @@ docker compose run --rm backtest --start 2022-01-01 --end 2025-12-31 --benchmark
 docker compose run --rm --entrypoint python portfolio-bot scripts/walk_forward.py
 ```
 
+### 環境變數
+
+| 變數 | 必填 | 說明 |
+|------|------|------|
+| `FINMIND_TOKEN` | ✅ | FinMind API token（免費版 600 req/hr） |
+| `DATA_CACHE_DIR` | ✅ | Cache 絕對路徑（例：`C:/Users/<user>/.../Quantitative-Trading/data/cache`）。避免 legacy Windows path 誤解析到 `C:\app\data\cache\` |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 可選 | 再平衡通知 |
+
+`src/utils/paths.py::resolve_cache_dir()` 會統一處理 `DATA_CACHE_DIR`，若未設則 fallback 到 `./data/cache`。
+
 ## 測試覆蓋
 
 ```bash
-python -m pytest tests/ -v  # 161 passed
+python -m pytest tests/ -v  # 219 passed
 ```
 
-| 測試範疇 | 數量 |
-|---------|------|
-| 績效指標（Sharpe/MDD/Alpha + known-answer） | 27 |
-| 回測引擎整合測試 | 17 |
-| FinMind cache/API | 17 |
-| Point-in-time 資料截斷 | 15 |
-| 再平衡日期生成 | 14 |
-| Universe 建構 | 14 |
-| 選股門檻 + hold buffer | 12 |
-| 因子排名 | 10 |
-| 波動率加權 | 9 |
-| 配息調整 + TWSE 日期解析 | 9 |
-| 零權重因子跳過 | 8 |
-| Drift-aware 日報酬 | 5 |
-| Data degradation | 4 |
-| Edge cases | 2 |
+涵蓋績效指標（Sharpe/MDD/Alpha + known-answer）、回測引擎整合、FinMind cache/API、Point-in-time 資料截斷、再平衡日期、Universe 建構、選股門檻、因子排名、波動率加權、配息調整、零權重因子跳過、Drift-aware 日報酬、Data degradation、cache 路徑解析、backtest strict 模式、format_report None 安全、dividends strict 等。
 
 ## 限制
 

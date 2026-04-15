@@ -256,13 +256,23 @@ def compute_metrics(
         result["underwater_pct"] = 0.0
 
     # --- 分布特徵 ---
+    # 常數/近常數序列會讓 scipy 吐 NaN（skew/kurtosis）或 precision-loss warning，
+    # 分母為 0 時直接填 None（表示無意義），避免下游誤用 NaN 計算。
     from scipy import stats as sp_stats
-    result["skewness"] = round(float(sp_stats.skew(portfolio_returns)), 4)
-    result["kurtosis"] = round(float(sp_stats.kurtosis(portfolio_returns)), 4)
-    # Jarque-Bera 常態性檢定：p < 0.05 表示非常態，Sharpe 不完全可信
-    jb_stat, jb_pvalue = sp_stats.jarque_bera(portfolio_returns)
-    result["jarque_bera_stat"] = round(float(jb_stat), 4)
-    result["jarque_bera_pvalue"] = round(float(jb_pvalue), 6)
+    _std_eps = 1e-12
+    if daily_std > _std_eps and len(portfolio_returns) >= 3:
+        _skew = sp_stats.skew(portfolio_returns)
+        _kurt = sp_stats.kurtosis(portfolio_returns)
+        jb_stat, jb_pvalue = sp_stats.jarque_bera(portfolio_returns)
+        result["skewness"] = round(float(_skew), 4) if np.isfinite(_skew) else None
+        result["kurtosis"] = round(float(_kurt), 4) if np.isfinite(_kurt) else None
+        result["jarque_bera_stat"] = round(float(jb_stat), 4) if np.isfinite(jb_stat) else None
+        result["jarque_bera_pvalue"] = round(float(jb_pvalue), 6) if np.isfinite(jb_pvalue) else None
+    else:
+        result["skewness"] = None
+        result["kurtosis"] = None
+        result["jarque_bera_stat"] = None
+        result["jarque_bera_pvalue"] = None
 
     # --- 風險調整報酬 ---
     daily_rf = (1 + risk_free_rate) ** (1 / TRADING_DAYS_PER_YEAR) - 1
@@ -288,15 +298,29 @@ def compute_metrics(
             {"portfolio": portfolio_returns, "benchmark": benchmark_returns}
         ).dropna()
 
-        if not aligned.empty:
+        # Sample-size guard：overlap 少於 21 天做年化會被 _ay 下限
+        # clamp 放大 100×，產生天文數字 alpha / bench_ann。少於一個月的
+        # 共同樣本本就不該做年化，直接跳過 benchmark 相對績效。
+        _MIN_BENCH_OVERLAP_DAYS = 21
+        if not aligned.empty and len(aligned) >= _MIN_BENCH_OVERLAP_DAYS:
             excess_vs_bench = aligned["portfolio"] - aligned["benchmark"]
 
+            # 用 aligned 本身的長度年化，不是 portfolio 的 n_years。
+            # 若 portfolio 有 N 天、benchmark 只有 M < N 天 overlap，aligned 後
+            # 剩 M 天；用 portfolio n_years (=N/252) 會讓 benchmark 年化分母錯。
+            aligned_n_years = len(aligned) / TRADING_DAYS_PER_YEAR
+            _ay = max(aligned_n_years, 0.01)
             bench_total = (1 + aligned["benchmark"]).prod() - 1
-            bench_ann = (1 + bench_total) ** (1 / max(n_years, 0.01)) - 1 if n_years > 0 else 0.0
+            bench_ann = (1 + bench_total) ** (1 / _ay) - 1 if aligned_n_years > 0 else 0.0
             result["benchmark_annualized_return"] = round(bench_ann, 6)
 
-            # Alpha (annualized excess)
-            alpha_ann = ann_return - bench_ann
+            # Alpha (annualized excess) — portfolio 段也要用 aligned 期間，
+            # 否則 ann_return 和 bench_ann 用不同時窗會製造假 alpha。
+            port_total_aligned = (1 + aligned["portfolio"]).prod() - 1
+            port_ann_aligned = (
+                (1 + port_total_aligned) ** (1 / _ay) - 1 if aligned_n_years > 0 else 0.0
+            )
+            alpha_ann = port_ann_aligned - bench_ann
             result["annualized_alpha"] = round(alpha_ann, 6)
 
             # Tracking Error
@@ -320,6 +344,11 @@ def compute_metrics(
             # Default to price_only; engine.py overrides to "total_return"
             # when dividend data is available (P4.5).
             result["benchmark_type"] = "price_only"
+        elif not aligned.empty:
+            logger.warning(
+                "Benchmark overlap too short (%d < %d days); skipping relative metrics",
+                len(aligned), _MIN_BENCH_OVERLAP_DAYS,
+            )
 
     return result
 
@@ -345,11 +374,23 @@ def format_report(metrics: dict, benchmark_name: str = "0050") -> str:
         lines.append(f"  CVaR 95%:       {metrics.get('cvar_95', 0):.2%}")
         lines.append(f"  Tail Ratio:     {metrics.get('tail_ratio', 0):.2f}")
     if "skewness" in metrics:
-        lines.append(f"  偏態:           {metrics.get('skewness', 0):.2f}")
-        lines.append(f"  峰度:           {metrics.get('kurtosis', 0):.2f}")
-        jb_p = metrics.get("jarque_bera_pvalue", 1.0)
-        normality = "非常態 ⚠️" if jb_p < 0.05 else "近似常態"
-        lines.append(f"  Jarque-Bera p:  {jb_p:.4f} ({normality})")
+        # compute_metrics sets skewness/kurtosis/jb to None on constant or
+        # degenerate return series (scipy yields NaN). dict.get(..., 0) only
+        # defaults on missing key — a present key with None still returns None
+        # and crashes f-string formatting. Render None as "N/A".
+        def _fmt(val, spec: str) -> str:
+            if val is None:
+                return "N/A"
+            return format(val, spec)
+
+        lines.append(f"  偏態:           {_fmt(metrics.get('skewness'), '.2f')}")
+        lines.append(f"  峰度:           {_fmt(metrics.get('kurtosis'), '.2f')}")
+        jb_p = metrics.get("jarque_bera_pvalue")
+        if jb_p is None:
+            lines.append("  Jarque-Bera p:  N/A")
+        else:
+            normality = "非常態 ⚠️" if jb_p < 0.05 else "近似常態"
+            lines.append(f"  Jarque-Bera p:  {jb_p:.4f} ({normality})")
     lines.append("")
 
     lines.append("--- 風險調整報酬 ---")

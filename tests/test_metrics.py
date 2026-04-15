@@ -318,3 +318,84 @@ class TestAdjustSplits:
         )
         adjusted = adjust_splits(prices)
         pd.testing.assert_series_equal(adjusted, prices.astype(float))
+
+
+class TestBenchmarkAnnualizationAlignment:
+    """M2: benchmark 年化分母用 aligned 期間，不是 portfolio n_years。"""
+
+    def test_aligned_window_shorter_than_portfolio(self):
+        """portfolio 252 天，benchmark 只在前 126 天 overlap。
+        benchmark_annualized_return 必須用 126/252 當分母，不是 252/252。"""
+        n = 252
+        dates = pd.date_range("2024-01-01", periods=n)
+        port = pd.Series([0.001] * n, index=dates)
+        # benchmark 只有前 126 天有資料
+        bench = pd.Series([0.0005] * 126, index=dates[:126])
+
+        result = compute_metrics(port, bench, risk_free_rate=0.0)
+
+        # benchmark_total = (1.0005)^126 - 1 ≈ 0.0645
+        # aligned_n_years = 126/252 = 0.5
+        # bench_ann = (1.0645)^2 - 1 ≈ 0.133
+        expected_bench_total = (1.0005) ** 126 - 1
+        expected_bench_ann = (1 + expected_bench_total) ** (252 / 126) - 1
+        assert abs(result["benchmark_annualized_return"] - expected_bench_ann) < 0.002
+
+        # alpha 也用 aligned 期間
+        expected_port_total = (1.001) ** 126 - 1
+        expected_port_ann = (1 + expected_port_total) ** (252 / 126) - 1
+        expected_alpha = expected_port_ann - expected_bench_ann
+        assert abs(result["annualized_alpha"] - expected_alpha) < 0.002
+
+
+class TestShortBenchmarkOverlapGuard:
+    """M2-guard: aligned<21 天不做年化，避免 _ay clamp 放大 100×。"""
+
+    def test_2_day_overlap_skips_relative_metrics(self):
+        port_dates = pd.date_range("2024-01-01", periods=252)
+        bench_dates = port_dates[-2:]
+        port = pd.Series([0.001] * 252, index=port_dates)
+        bench = pd.Series([0.005, 0.005], index=bench_dates)
+        result = compute_metrics(port, bench, risk_free_rate=0.0)
+        assert "annualized_alpha" not in result
+        assert "benchmark_annualized_return" not in result
+        assert "beta" not in result
+
+    def test_exact_21_day_overlap_computes_metrics(self):
+        dates = pd.date_range("2024-01-01", periods=21)
+        port = pd.Series([0.001] * 21, index=dates)
+        bench = pd.Series([0.0005] * 21, index=dates)
+        result = compute_metrics(port, bench, risk_free_rate=0.0)
+        assert "annualized_alpha" in result
+        assert "beta" in result
+
+
+class TestStatStabilityOnConstants:
+    """M3: 常數/近常數序列不應讓 skew/kurtosis/JB 吐 NaN。"""
+
+    def test_constant_series_stats_are_none(self):
+        """全部 +1% 序列 → std=0 → skew/kurt/JB 應為 None，不是 NaN。"""
+        rets = pd.Series([0.01] * 10, index=pd.date_range("2024-01-01", periods=10))
+        result = compute_metrics(rets)
+        assert result["skewness"] is None
+        assert result["kurtosis"] is None
+        assert result["jarque_bera_stat"] is None
+        assert result["jarque_bera_pvalue"] is None
+
+    def test_zero_series_stats_are_none(self):
+        rets = pd.Series([0.0] * 20, index=pd.date_range("2024-01-01", periods=20))
+        result = compute_metrics(rets)
+        assert result["skewness"] is None
+        assert result["kurtosis"] is None
+
+    def test_non_constant_series_stats_are_finite(self):
+        np.random.seed(0)
+        rets = pd.Series(
+            np.random.normal(0.0005, 0.01, 500),
+            index=pd.date_range("2024-01-01", periods=500),
+        )
+        result = compute_metrics(rets)
+        assert result["skewness"] is not None
+        assert result["kurtosis"] is not None
+        assert np.isfinite(result["skewness"])
+        assert np.isfinite(result["kurtosis"])

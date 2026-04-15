@@ -168,27 +168,33 @@ def fetch_tpex_turnover(as_of: datetime) -> dict[str, float]:
 # Process-level cache：把每支股票的「日期 -> close*volume」series 存成 dict
 # 第一次讀某支股票時 load pkl 並計算 turnover series（一次性），之後 rebalance 直接切片。
 # 整個回測 run（甚至 walk-forward 跨 window）共享。
-_TURNOVER_SERIES_CACHE: dict[str, "pd.Series"] = {}
+# Key is (cache_dir_str, stock_id) so swapping DATA_CACHE_DIR between
+# pytest fixtures or walk-forward windows does not leak old series.
+_TURNOVER_SERIES_CACHE: dict[tuple[str, str], "pd.Series | None"] = {}
 
 
 def _load_turnover_series(stock_id: str, ohlcv_dir: pathlib.Path) -> "pd.Series | None":
     """讀 stock_id.pkl 並回傳 close*volume 序列（index = UTC date）。失敗回 None。"""
-    if stock_id in _TURNOVER_SERIES_CACHE:
-        return _TURNOVER_SERIES_CACHE[stock_id]
+    key = (str(ohlcv_dir), stock_id)
+    if key in _TURNOVER_SERIES_CACHE:
+        return _TURNOVER_SERIES_CACHE[key]
     pkl = ohlcv_dir / f"{stock_id}.pkl"
     if not pkl.exists():
-        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+        _TURNOVER_SERIES_CACHE[key] = None
         return None
     try:
         df = pd.read_pickle(pkl)
-    except Exception:
-        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+    except Exception as exc:
+        # Transient I/O error (OneDrive lock, partial write, FS flake) — do NOT
+        # negative-cache. Next call retries. Only "file missing" earns a permanent
+        # None cache above.
+        logger.warning("transient read fail for %s.pkl: %s", stock_id, exc)
         return None
     if df is None or df.empty or "close" not in df.columns or "volume" not in df.columns:
-        _TURNOVER_SERIES_CACHE[stock_id] = None  # type: ignore[assignment]
+        _TURNOVER_SERIES_CACHE[key] = None
         return None
     series = (df["close"] * df["volume"]).dropna()
-    _TURNOVER_SERIES_CACHE[stock_id] = series
+    _TURNOVER_SERIES_CACHE[key] = series
     return series
 
 
@@ -216,14 +222,9 @@ def _cache_based_turnover(
     else:
         as_of_ts = as_of_ts.tz_convert("UTC")
 
-    # 解析 cache 目錄（與 finmind.FinMindSource 同樣邏輯）
-    import os as _os
-    _cache_env = _os.environ.get("DATA_CACHE_DIR", "/app/data/cache")
-    ohlcv_dir = pathlib.Path(_cache_env) / "ohlcv"
-    if not ohlcv_dir.exists():
-        # Windows 本機 fallback：相對專案根目錄
-        proj_root = pathlib.Path(__file__).resolve().parent.parent.parent
-        ohlcv_dir = proj_root / "data" / "cache" / "ohlcv"
+    # 解析 cache 目錄（與 finmind.FinMindSource / backtest.universe 統一）
+    from src.utils.paths import resolve_cache_dir
+    ohlcv_dir = resolve_cache_dir() / "ohlcv"
     if not ohlcv_dir.exists():
         return {}
 

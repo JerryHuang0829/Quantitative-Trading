@@ -486,19 +486,100 @@ def _prepare_auto_universe_by_size_proxy(
     if exclude_symbols:
         working = working[~working["stock_id"].isin(exclude_symbols)]
 
+    # --- TWSE 成交金額預篩（與 backtest universe.py 同規格，live/backtest parity）---
+    # 先把 ~1900 支縮到流動性前 N 名（預設 400），再算 size_proxy top 80。
+    # 這一層原本只在 backtest 有，live 少了會造成實盤選股與回測模擬不一致。
+    pre_filter_size = int(portfolio_config.get("auto_universe_pre_filter_size", 0) or 0)
+    if pre_filter_size > 0 and len(working) > pre_filter_size:
+        try:
+            from src.data.twse_scraper import fetch_combined_turnover
+            from datetime import datetime as _dt
+            ohlcv_src = source.fetch_ohlcv if hasattr(source, "fetch_ohlcv") else None
+            candidate_ids = working["stock_id"].astype(str).tolist()
+            _turnover = fetch_combined_turnover(
+                _dt.now(),
+                ohlcv_source=ohlcv_src,
+                stock_ids=candidate_ids,
+            )
+        except Exception as _exc:
+            logger.warning("Live pre-filter: TWSE scraper failed: %s", _exc)
+            _turnover = {}
+
+        if _turnover:
+            min_coverage = float(
+                portfolio_config.get("auto_universe_pre_filter_min_coverage", 0.80)
+            )
+            coverage = len(_turnover) / max(len(working), 1)
+            if coverage < min_coverage:
+                raise RuntimeError(
+                    f"Live pre-filter coverage too low: "
+                    f"{len(_turnover)}/{len(working)} ({coverage:.1%}) "
+                    f"< min {min_coverage:.0%}. Cache likely incomplete."
+                )
+            working["_pre_turnover"] = working["stock_id"].map(_turnover).fillna(0.0)
+            working = (
+                working
+                .sort_values(["_pre_turnover", "stock_id"], ascending=[False, True])
+                .head(pre_filter_size)
+                .drop(columns=["_pre_turnover"])
+                .reset_index(drop=True)
+            )
+            logger.info(
+                "Live pre-filter: → %d stocks (coverage %.1f%%)",
+                len(working), coverage * 100,
+            )
+        else:
+            raise RuntimeError(
+                "Live pre-filter: TWSE turnover unavailable — "
+                "refusing to run live selection on full market without pre-filter."
+            )
+
     # 計算 size proxy: close × volume 的 20 日均值
+    # Hard-fail guard: source 必須可用，否則 live 會退化成字典序 top-N。
+    if source is None:
+        raise RuntimeError(
+            "Live universe selection requires a data source; got source=None. "
+            "Refusing to run size-proxy ranking on stock_id lexicographic order."
+        )
+    if not hasattr(source, "fetch_ohlcv"):
+        raise RuntimeError(
+            f"Live universe selection requires source.fetch_ohlcv; "
+            f"got {type(source).__name__} without it."
+        )
+
     size_proxy: dict[str, float] = {}
+    n_success = 0
+    failed_samples: list[str] = []
     for _, row in working.iterrows():
         sym = str(row["stock_id"])
         try:
             df = source.fetch_ohlcv(sym, "D", 30)
             if df is not None and len(df) >= 5:
                 turnover = (df["close"] * df["volume"]).tail(20).mean()
-                size_proxy[sym] = float(turnover) if pd.notna(turnover) else 0.0
-            else:
-                size_proxy[sym] = 0.0
-        except Exception:
+                if pd.notna(turnover):
+                    size_proxy[sym] = float(turnover)
+                    n_success += 1
+                    continue
             size_proxy[sym] = 0.0
+            if len(failed_samples) < 10:
+                failed_samples.append(sym)
+        except Exception as _exc:
+            size_proxy[sym] = 0.0
+            if len(failed_samples) < 10:
+                failed_samples.append(f"{sym}:{type(_exc).__name__}")
+
+    total = max(len(working), 1)
+    success_rate = n_success / total
+    min_success = float(
+        portfolio_config.get("auto_universe_size_proxy_min_success", 0.60)
+    )
+    if success_rate < min_success:
+        raise RuntimeError(
+            f"Live size-proxy success rate too low: "
+            f"{n_success}/{total} ({success_rate:.1%}) < min {min_success:.0%}. "
+            f"Sample failures: {failed_samples[:5]}. "
+            f"Refusing to fall back to stock_id lexicographic order."
+        )
 
     working["_size_proxy"] = working["stock_id"].map(size_proxy).fillna(0.0)
     working = working.sort_values(["_size_proxy", "stock_id"], ascending=[False, True])
