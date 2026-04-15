@@ -266,7 +266,7 @@ class FinMindSource(DataSource):
             # With _WIDE_LOOKBACK_DAYS=4000, any first fetch already covers 11 years.
             # For existing symbols cached before this setting, 1000+ rows is sufficient
             # for any 3Y+ backtest — the slicer truncates to the actual backtest window.
-            cached_in_range = cached[cached.index >= pd.Timestamp(want_start, tz="UTC")]
+            cached_in_range = cached[cached.index >= pd.Timestamp(want_start).tz_convert("UTC")]
             if len(cached) < 252 and c_min > req_start + pd.Timedelta(days=1):
                 old = self._api_fetch_ohlcv(
                     symbol,
